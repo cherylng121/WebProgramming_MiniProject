@@ -116,9 +116,10 @@ if ($result) {
     }
 }
 
-// Get all events
+// Get all events with registration counts
 $events = [];
-$sql = "SELECT e.*, u.name as organizer_name 
+$sql = "SELECT e.*, u.name as organizer_name,
+        (SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.event_id) as registration_count
         FROM events e 
         JOIN users u ON e.organizer_id = u.user_id 
         ORDER BY e.event_date DESC";
@@ -126,6 +127,25 @@ $result = mysqli_query($conn, $sql);
 if ($result) {
     while ($row = mysqli_fetch_assoc($result)) {
         $events[] = $row;
+    }
+}
+
+// Get registrations grouped by event
+$event_registrations = [];
+$sql = "SELECT e.event_id, e.title as event_title,
+        COUNT(r.registration_id) as total_registrations,
+        SUM(CASE WHEN r.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN r.status = 'approved' THEN 1 ELSE 0 END) as approved_count,
+        SUM(CASE WHEN r.status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
+        SUM(CASE WHEN r.status = 'cancelled' THEN 1 ELSE 0 END) as cancelled_count
+        FROM events e
+        LEFT JOIN registrations r ON e.event_id = r.event_id
+        GROUP BY e.event_id, e.title
+        ORDER BY e.event_date DESC";
+$result = mysqli_query($conn, $sql);
+if ($result) {
+    while ($row = mysqli_fetch_assoc($result)) {
+        $event_registrations[$row['event_id']] = $row;
     }
 }
 
@@ -303,6 +323,54 @@ if ($result) {
         <!-- Registration Management Section -->
         <section id="registrations" class="mb-5">
             <h2 class="mb-4">Registration Management</h2>
+            
+            <!-- Event Selection -->
+            <div class="mb-4">
+                <select class="form-select" id="eventFilter" onchange="filterRegistrations(this.value)">
+                    <option value="">All Events</option>
+                    <?php foreach ($events as $event): ?>
+                    <option value="<?php echo $event['event_id']; ?>">
+                        <?php echo htmlspecialchars($event['title']); ?> 
+                        (<?php echo $event['registration_count']; ?> registrations)
+                    </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <!-- Registration Statistics -->
+            <div class="row mb-4">
+                <?php foreach ($event_registrations as $event_id => $stats): ?>
+                <div class="col-md-6 col-lg-3 mb-3 event-stats" data-event-id="<?php echo $event_id; ?>">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6 class="card-title"><?php echo htmlspecialchars($stats['event_title']); ?></h6>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Total:</span>
+                                <span class="badge bg-primary"><?php echo $stats['total_registrations']; ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Pending:</span>
+                                <span class="badge bg-warning"><?php echo $stats['pending_count']; ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Approved:</span>
+                                <span class="badge bg-success"><?php echo $stats['approved_count']; ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between mb-2">
+                                <span>Rejected:</span>
+                                <span class="badge bg-danger"><?php echo $stats['rejected_count']; ?></span>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <span>Cancelled:</span>
+                                <span class="badge bg-secondary"><?php echo $stats['cancelled_count']; ?></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Registrations Table -->
             <div class="card">
                 <div class="card-body">
                     <div class="table-responsive">
@@ -319,16 +387,38 @@ if ($result) {
                             </thead>
                             <tbody>
                                 <?php foreach ($registrations as $registration): ?>
-                                <tr>
+                                <tr class="registration-row" data-event-id="<?php echo $registration['event_id']; ?>">
                                     <td><?php echo $registration["registration_id"]; ?></td>
                                     <td><?php echo htmlspecialchars($registration["student_name"]); ?></td>
                                     <td><?php echo htmlspecialchars($registration["event_title"]); ?></td>
                                     <td><?php echo htmlspecialchars($registration["registration_date"]); ?></td>
-                                    <td><?php echo htmlspecialchars($registration["status"]); ?></td>
                                     <td>
-                                        <button class="btn btn-sm btn-primary" onclick="viewRegistrationDetails(<?php echo $registration["registration_id"]; ?>)">
-                                            <i class="fas fa-eye"></i>
-                                        </button>
+                                        <span class="badge bg-<?php 
+                                            echo match($registration["status"]) {
+                                                'pending' => 'warning',
+                                                'approved' => 'success',
+                                                'rejected' => 'danger',
+                                                'cancelled' => 'secondary',
+                                                default => 'primary'
+                                            };
+                                        ?>">
+                                            <?php echo ucfirst(htmlspecialchars($registration["status"])); ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <div class="btn-group">
+                                            <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#viewRegistrationModal" onclick="viewRegistrationDetails(<?php echo htmlspecialchars(json_encode($registration)); ?>)">
+                                                <i class="fas fa-eye"></i>
+                                            </button>
+                                            <?php if ($registration["status"] == "pending"): ?>
+                                            <button class="btn btn-sm btn-success" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'approved')">
+                                                <i class="fas fa-check"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-danger" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'rejected')">
+                                                <i class="fas fa-times"></i>
+                                            </button>
+                                            <?php endif; ?>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -338,6 +428,63 @@ if ($result) {
                 </div>
             </div>
         </section>
+
+        <!-- View Registration Modal -->
+        <div class="modal fade" id="viewRegistrationModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Registration Details</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Student Name</label>
+                            <p id="view_student_name"></p>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Event Title</label>
+                            <p id="view_event_title"></p>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Registration Date</label>
+                            <p id="view_registration_date"></p>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-bold">Status</label>
+                            <p id="view_status"></p>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Update Registration Status Modal -->
+        <div class="modal fade" id="updateRegistrationModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Update Registration Status</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="POST">
+                        <div class="modal-body">
+                            <input type="hidden" name="action" value="update_registration">
+                            <input type="hidden" name="registration_id" id="update_registration_id">
+                            <input type="hidden" name="status" id="update_status">
+                            <p>Are you sure you want to <span id="status_action"></span> this registration?</p>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Confirm</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Add User Modal -->
@@ -492,8 +639,39 @@ if ($result) {
             // Implement event deletion functionality
         }
 
-        function viewRegistrationDetails(registrationId) {
-            // Implement registration details view functionality
+        function viewRegistrationDetails(registration) {
+            document.getElementById('view_student_name').textContent = registration.student_name;
+            document.getElementById('view_event_title').textContent = registration.event_title;
+            document.getElementById('view_registration_date').textContent = registration.registration_date;
+            document.getElementById('view_status').textContent = registration.status;
+        }
+
+        function updateRegistrationStatus(registrationId, status) {
+            document.getElementById('update_registration_id').value = registrationId;
+            document.getElementById('update_status').value = status;
+            document.getElementById('status_action').textContent = status === 'approved' ? 'approve' : 'reject';
+            new bootstrap.Modal(document.getElementById('updateRegistrationModal')).show();
+        }
+
+        function filterRegistrations(eventId) {
+            const rows = document.querySelectorAll('.registration-row');
+            const stats = document.querySelectorAll('.event-stats');
+            
+            rows.forEach(row => {
+                if (!eventId || row.dataset.eventId === eventId) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+
+            stats.forEach(stat => {
+                if (!eventId || stat.dataset.eventId === eventId) {
+                    stat.style.display = '';
+                } else {
+                    stat.style.display = 'none';
+                }
+            });
         }
     </script>
 </body>
