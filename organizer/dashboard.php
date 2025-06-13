@@ -70,7 +70,40 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                     $_SESSION["error"] = "Failed to delete event.";
                 }
                 break;
+
+            case "update_registration":
+                $registration_id = (int)$_POST["registration_id"];
+                $status = trim($_POST["status"]);
+                
+                // Verify the registration belongs to an event organized by this organizer
+                $sql = "SELECT r.registration_id 
+                        FROM registrations r 
+                        JOIN events e ON r.event_id = e.event_id 
+                        WHERE r.registration_id = ? AND e.organizer_id = ?";
+                $stmt = mysqli_prepare($conn, $sql);
+                mysqli_stmt_bind_param($stmt, "ii", $registration_id, $organizer_id);
+                mysqli_stmt_execute($stmt);
+                mysqli_stmt_store_result($stmt);
+                
+                if (mysqli_stmt_num_rows($stmt) > 0) {
+                    $sql = "UPDATE registrations SET status = ? WHERE registration_id = ?";
+                    $stmt = mysqli_prepare($conn, $sql);
+                    mysqli_stmt_bind_param($stmt, "si", $status, $registration_id);
+                    
+                    if (mysqli_stmt_execute($stmt)) {
+                        $_SESSION["success"] = "Registration status updated successfully!";
+                    } else {
+                        $_SESSION["error"] = "Failed to update registration status.";
+                    }
+                } else {
+                    $_SESSION["error"] = "Invalid registration.";
+                }
+                break;
         }
+        
+        // Redirect to prevent form resubmission
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit();
     }
 }
 
@@ -233,9 +266,19 @@ while ($row = mysqli_fetch_assoc($result)) {
                                     <td><?php echo htmlspecialchars($registration["registration_date"]); ?></td>
                                     <td><?php echo htmlspecialchars($registration["status"]); ?></td>
                                     <td>
-                                        <button class="btn btn-sm btn-primary" onclick="viewRegistrationDetails(<?php echo $registration["registration_id"]; ?>)">
-                                            <i class="fas fa-eye"></i>
-                                        </button>
+                                        <div class="btn-group">
+                                            <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#viewRegistrationModal" onclick="viewRegistrationDetails(<?php echo htmlspecialchars(json_encode($registration)); ?>)">
+                                                <i class="fas fa-eye"></i>
+                                            </button>
+                                            <?php if ($registration["status"] == "pending"): ?>
+                                            <button class="btn btn-sm btn-success" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'approved')">
+                                                <i class="fas fa-check"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-danger" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'rejected')">
+                                                <i class="fas fa-times"></i>
+                                            </button>
+                                            <?php endif; ?>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -362,6 +405,63 @@ while ($row = mysqli_fetch_assoc($result)) {
         </div>
     </div>
 
+    <!-- View Registration Modal -->
+    <div class="modal fade" id="viewRegistrationModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Registration Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Student Name</label>
+                        <p id="view_student_name"></p>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Event Title</label>
+                        <p id="view_event_title"></p>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Registration Date</label>
+                        <p id="view_registration_date"></p>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Status</label>
+                        <p id="view_status"></p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Update Registration Status Modal -->
+    <div class="modal fade" id="updateRegistrationModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Update Registration Status</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="action" value="update_registration">
+                        <input type="hidden" name="registration_id" id="update_registration_id">
+                        <input type="hidden" name="status" id="update_status">
+                        <p>Are you sure you want to <span id="status_action"></span> this registration?</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Confirm</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         function editEvent(event) {
@@ -380,8 +480,18 @@ while ($row = mysqli_fetch_assoc($result)) {
             new bootstrap.Modal(document.getElementById('deleteEventModal')).show();
         }
 
-        function viewRegistrationDetails(registrationId) {
-            // Implement registration details view functionality
+        function viewRegistrationDetails(registration) {
+            document.getElementById('view_student_name').textContent = registration.student_name;
+            document.getElementById('view_event_title').textContent = registration.event_title;
+            document.getElementById('view_registration_date').textContent = registration.registration_date;
+            document.getElementById('view_status').textContent = registration.status;
+        }
+
+        function updateRegistrationStatus(registrationId, status) {
+            document.getElementById('update_registration_id').value = registrationId;
+            document.getElementById('update_status').value = status;
+            document.getElementById('status_action').textContent = status === 'approved' ? 'approve' : 'reject';
+            new bootstrap.Modal(document.getElementById('updateRegistrationModal')).show();
         }
     </script>
 </body>
