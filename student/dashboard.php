@@ -13,46 +13,76 @@ $student_id = $_SESSION["user_id"];
 $student_name = $_SESSION["name"];
 
 // Handle event registration
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action"]) && $_POST["action"] == "register_event") {
-    $event_id = (int)$_POST["event_id"];
-    
-    // Check if already registered
-    $sql = "SELECT registration_id FROM registrations WHERE event_id = ? AND student_id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "ii", $event_id, $student_id);
-    mysqli_stmt_execute($stmt);
-    mysqli_stmt_store_result($stmt);
-    
-    if (mysqli_stmt_num_rows($stmt) == 0) {
-        // Check event capacity
-        $sql = "SELECT e.capacity, COUNT(r.registration_id) as registered_count 
-                FROM events e 
-                LEFT JOIN registrations r ON e.event_id = r.event_id 
-                WHERE e.event_id = ? 
-                GROUP BY e.event_id";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, "i", $event_id);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        $event = mysqli_fetch_assoc($result);
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["action"])) {
+    if ($_POST["action"] == "register_event") {
+        $event_id = (int)$_POST["event_id"];
         
-        if ($event["registered_count"] < $event["capacity"]) {
-            // Register for event
-            $sql = "INSERT INTO registrations (event_id, student_id) VALUES (?, ?)";
+        // Check if already registered
+        $sql = "SELECT registration_id FROM registrations WHERE event_id = ? AND student_id = ?";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "ii", $event_id, $student_id);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_store_result($stmt);
+        
+        if (mysqli_stmt_num_rows($stmt) == 0) {
+            // Check event capacity
+            $sql = "SELECT e.capacity, COUNT(r.registration_id) as registered_count 
+                    FROM events e 
+                    LEFT JOIN registrations r ON e.event_id = r.event_id 
+                    WHERE e.event_id = ? 
+                    GROUP BY e.event_id";
             $stmt = mysqli_prepare($conn, $sql);
-            mysqli_stmt_bind_param($stmt, "ii", $event_id, $student_id);
+            mysqli_stmt_bind_param($stmt, "i", $event_id);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
+            $event = mysqli_fetch_assoc($result);
             
-            if (mysqli_stmt_execute($stmt)) {
-                $_SESSION["success"] = "Successfully registered for the event!";
+            if ($event["registered_count"] < $event["capacity"]) {
+                // Register for event
+                $sql = "INSERT INTO registrations (event_id, student_id) VALUES (?, ?)";
+                $stmt = mysqli_prepare($conn, $sql);
+                mysqli_stmt_bind_param($stmt, "ii", $event_id, $student_id);
+                
+                if (mysqli_stmt_execute($stmt)) {
+                    $_SESSION["success"] = "Successfully registered for the event!";
+                } else {
+                    $_SESSION["error"] = "Failed to register for the event.";
+                }
             } else {
-                $_SESSION["error"] = "Failed to register for the event.";
+                $_SESSION["error"] = "Event is already full.";
             }
         } else {
-            $_SESSION["error"] = "Event is already full.";
+            $_SESSION["error"] = "You are already registered for this event.";
         }
-    } else {
-        $_SESSION["error"] = "You are already registered for this event.";
+    } elseif ($_POST["action"] == "cancel_registration") {
+        $registration_id = (int)$_POST["registration_id"];
+        
+        // Verify the registration belongs to this student
+        $sql = "SELECT registration_id FROM registrations WHERE registration_id = ? AND student_id = ?";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "ii", $registration_id, $student_id);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_store_result($stmt);
+        
+        if (mysqli_stmt_num_rows($stmt) > 0) {
+            // Update registration status to cancelled
+            $sql = "UPDATE registrations SET status = 'cancelled' WHERE registration_id = ?";
+            $stmt = mysqli_prepare($conn, $sql);
+            mysqli_stmt_bind_param($stmt, "i", $registration_id);
+            
+            if (mysqli_stmt_execute($stmt)) {
+                $_SESSION["success"] = "Registration cancelled successfully!";
+            } else {
+                $_SESSION["error"] = "Failed to cancel registration.";
+            }
+        } else {
+            $_SESSION["error"] = "Invalid registration.";
+        }
     }
+    
+    // Redirect to prevent form resubmission
+    header("Location: " . $_SERVER['PHP_SELF']);
+    exit();
 }
 
 // Get available events
@@ -62,7 +92,7 @@ $sql = "SELECT e.*, u.name as organizer_name,
         FROM events e 
         JOIN users u ON e.organizer_id = u.user_id 
         WHERE e.status = 'upcoming' 
-        AND e.event_id NOT IN (SELECT event_id FROM registrations WHERE student_id = ?) 
+        AND e.event_id NOT IN (SELECT event_id FROM registrations WHERE student_id = ? AND status != 'cancelled') 
         ORDER BY e.event_date ASC";
 $stmt = mysqli_prepare($conn, $sql);
 mysqli_stmt_bind_param($stmt, "i", $student_id);
@@ -160,7 +190,7 @@ while ($row = mysqli_fetch_assoc($result)) {
                                 <li><i class="fas fa-user"></i> Organizer: <?php echo htmlspecialchars($event["organizer_name"]); ?></li>
                                 <li><i class="fas fa-users"></i> Available Spots: <?php echo $event["capacity"] - $event["registered_count"]; ?></li>
                             </ul>
-                            <form action="" method="POST" class="mt-3">
+                            <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="POST" class="mt-3">
                                 <input type="hidden" name="action" value="register_event">
                                 <input type="hidden" name="event_id" value="<?php echo $event["event_id"]; ?>">
                                 <button type="submit" class="btn btn-primary w-100">Register for Event</button>
@@ -187,6 +217,7 @@ while ($row = mysqli_fetch_assoc($result)) {
                                     <th>Organizer</th>
                                     <th>Registration Date</th>
                                     <th>Status</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -199,12 +230,27 @@ while ($row = mysqli_fetch_assoc($result)) {
                                     <td><?php echo htmlspecialchars($registration["registration_date"]); ?></td>
                                     <td>
                                         <span class="badge bg-<?php 
-                                            echo $registration["status"] == "approved" ? "success" : 
-                                                ($registration["status"] == "pending" ? "warning" : 
-                                                ($registration["status"] == "rejected" ? "danger" : "secondary")); 
+                                            echo match($registration["status"]) {
+                                                'pending' => 'warning',
+                                                'approved' => 'success',
+                                                'rejected' => 'danger',
+                                                'cancelled' => 'secondary',
+                                                default => 'primary'
+                                            };
                                         ?>">
                                             <?php echo ucfirst(htmlspecialchars($registration["status"])); ?>
                                         </span>
+                                    </td>
+                                    <td>
+                                        <?php if ($registration["status"] == "pending" || $registration["status"] == "approved"): ?>
+                                        <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="POST" class="d-inline">
+                                            <input type="hidden" name="action" value="cancel_registration">
+                                            <input type="hidden" name="registration_id" value="<?php echo $registration["registration_id"]; ?>">
+                                            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to cancel this registration?')">
+                                                Cancel
+                                            </button>
+                                        </form>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
