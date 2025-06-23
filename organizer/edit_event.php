@@ -1,237 +1,264 @@
 <?php
-require_once '../config/database.php';
-require_once '../config/session.php';
+require_once '../includes/functions.php';
+requireLevel('2'); // Event Organizer only
 
-// Require organizer role
-requireRole('organizer');
+$pdo = getDBConnection();
+$user_id = $_SESSION['user_id'];
+$message = '';
+$errors = [];
 
-// Get event ID from URL
-$event_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+// Get event ID
+$event_id = $_GET['id'] ?? 0;
 
-// Verify event exists and belongs to organizer
-$sql = "SELECT * FROM events WHERE event_id = ? AND organizer_id = ?";
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, "ii", $event_id, $_SESSION['user_id']);
-mysqli_stmt_execute($stmt);
-$result = $stmt->get_result();
+// Verify the event belongs to this organizer and is pending
+$stmt = $pdo->prepare("SELECT e.*, GROUP_CONCAT(ecm.category_id) as selected_categories 
+                       FROM events e 
+                       LEFT JOIN event_category_mapping ecm ON e.event_id = ecm.event_id 
+                       WHERE e.event_id = ? AND e.created_by = ? AND e.status = 'pending'
+                       GROUP BY e.event_id");
+$stmt->execute([$event_id, $user_id]);
+$event = $stmt->fetch(PDO::FETCH_ASSOC);
 
-if (mysqli_num_rows($result) === 0) {
-    $_SESSION['error_message'] = "Event not found or unauthorized access.";
-    header("Location: events.php");
+if (!$event) {
+    header('Location: events.php');
     exit();
 }
 
-$event = mysqli_fetch_assoc($result);
+// Get event categories
+$stmt = $pdo->query("SELECT * FROM event_categories ORDER BY category_name");
+$categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle form submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $title = trim($_POST['title']);
-    $description = trim($_POST['description']);
-    $event_date = $_POST['event_date'];
-    $location = trim($_POST['location']);
-    $capacity = (int)$_POST['capacity'];
-    $status = $_POST['status'];
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $title = sanitizeInput($_POST['title']);
+    $description = sanitizeInput($_POST['description']);
+    $event_date = sanitizeInput($_POST['event_date']);
+    $event_time = sanitizeInput($_POST['event_time']);
+    $location = sanitizeInput($_POST['location']);
+    $capacity = sanitizeInput($_POST['capacity']);
+    $selected_categories = $_POST['categories'] ?? [];
     
-    // Validate input
-    $errors = [];
+    // Validation
+    if (empty($title)) $errors[] = 'Event title is required';
+    if (empty($description)) $errors[] = 'Event description is required';
+    if (empty($event_date)) $errors[] = 'Event date is required';
+    if (empty($event_time)) $errors[] = 'Event time is required';
+    if (empty($location)) $errors[] = 'Event location is required';
     
-    if (empty($title)) {
-        $errors[] = "Title is required.";
+    if (!empty($event_date) && !validateFutureDate($event_date)) {
+        $errors[] = 'Event date must be today or in the future';
     }
     
-    if (empty($description)) {
-        $errors[] = "Description is required.";
-    }
-    
-    if (empty($event_date)) {
-        $errors[] = "Event date is required.";
-    } elseif (strtotime($event_date) < time() && $status === 'upcoming') {
-        $errors[] = "Upcoming event date must be in the future.";
-    }
-    
-    if (empty($location)) {
-        $errors[] = "Location is required.";
-    }
-    
-    if ($capacity <= 0) {
-        $errors[] = "Capacity must be greater than 0.";
-    }
-    
-    if (!in_array($status, ['upcoming', 'ongoing', 'completed'])) {
-        $errors[] = "Invalid status.";
+    if (!empty($capacity) && !validateCapacity($capacity)) {
+        $errors[] = 'Capacity must be a positive number';
     }
     
     if (empty($errors)) {
-        // Update event
-        $sql = "UPDATE events 
-                SET title = ?, description = ?, event_date = ?, location = ?, capacity = ?, status = ? 
-                WHERE event_id = ? AND organizer_id = ?";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, "ssssisii", 
-            $title,
-            $description,
-            $event_date,
-            $location,
-            $capacity,
-            $status,
-            $event_id,
-            $_SESSION['user_id']
-        );
-        
-        if (mysqli_stmt_execute($stmt)) {
-            $_SESSION['success_message'] = "Event updated successfully.";
-            header("Location: events.php");
-            exit();
-        } else {
-            $errors[] = "Error updating event. Please try again.";
+        try {
+            $pdo->beginTransaction();
+            
+            // Update event
+            $stmt = $pdo->prepare("UPDATE events SET title = ?, description = ?, event_date = ?, event_time = ?, location = ?, capacity = ? WHERE event_id = ? AND created_by = ?");
+            $stmt->execute([$title, $description, $event_date, $event_time, $location, $capacity, $event_id, $user_id]);
+            
+            // Remove existing category mappings
+            $stmt = $pdo->prepare("DELETE FROM event_category_mapping WHERE event_id = ?");
+            $stmt->execute([$event_id]);
+            
+            // Insert new category mappings
+            if (!empty($selected_categories)) {
+                $stmt = $pdo->prepare("INSERT INTO event_category_mapping (event_id, category_id) VALUES (?, ?)");
+                foreach ($selected_categories as $category_id) {
+                    $stmt->execute([$event_id, $category_id]);
+                }
+            }
+            
+            $pdo->commit();
+            $message = 'Event updated successfully!';
+            
+            // Refresh event data
+            $stmt = $pdo->prepare("SELECT e.*, GROUP_CONCAT(ecm.category_id) as selected_categories 
+                                   FROM events e 
+                                   LEFT JOIN event_category_mapping ecm ON e.event_id = ecm.event_id 
+                                   WHERE e.event_id = ? AND e.created_by = ? AND e.status = 'pending'
+                                   GROUP BY e.event_id");
+            $stmt->execute([$event_id, $user_id]);
+            $event = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            $errors[] = 'Database error: ' . $e->getMessage();
         }
     }
 }
+
+$selected_categories_array = $event['selected_categories'] ? explode(',', $event['selected_categories']) : [];
+
+$user = getUserById($_SESSION['user_id']);
+$profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_picture'] : '../images/organizer.png';
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Event - Student Event Management System</title>
+    <title>Edit Event - Event Organizer Dashboard</title>
     <link rel="stylesheet" href="../assets/css/style.css">
 </head>
 <body>
-    <div class="dashboard">
-        <div class="sidebar">
-            <h3>Organizer Panel</h3>
-            <ul>
-                <li><a href="organizer.php">Home</a></li>
-                <li><a href="events.php" class="active">Manage Events</a></li>
-                <li><a href="registrations.php">Manage Registrations</a></li>
-                <li><a href="profile.php">Profile</a></li>
-                <li><a href="../logout.php">Logout</a></li>
+    <div class="header">
+        <div class="navbar">
+            <a href="dashboard.php" class="navbar-brand">Event Organizer Dashboard</a>
+            <ul class="navbar-nav">
+                <li><a href="dashboard.php" class="nav-link">Dashboard</a></li>
+                <li><a href="events.php" class="nav-link">My Events</a></li>
+                <li><a href="create_event.php" class="nav-link">Create Event</a></li>
+                <li><a href="registrations.php" class="nav-link">Registrations</a></li>
+                <li><a href="analytics.php" class="nav-link">Analytics</a></li>
+                <li><a href="profile.php" class="nav-link">Profile</a></li>
+                <li><a href="../logout.php" class="nav-link">Logout</a></li>
             </ul>
-        </div>
-        
-        <div class="main-content">
-            <div class="page-header">
-                <h2>Edit Event</h2>
-                <a href="events.php" class="btn btn-secondary">Back to Events</a>
-            </div>
-            
-            <?php if (!empty($errors)): ?>
-                <div class="alert alert-danger">
-                    <ul class="error-list">
-                        <?php foreach ($errors as $error): ?>
-                            <li><?php echo htmlspecialchars($error); ?></li>
-                        <?php endforeach; ?>
-                    </ul>
-                </div>
-            <?php endif; ?>
-            
-            <div class="card">
-                <form method="POST" action="" class="event-form">
-                    <div class="form-group">
-                        <label for="title">Event Title *</label>
-                        <input type="text" id="title" name="title" value="<?php echo htmlspecialchars($event['title']); ?>" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="description">Description *</label>
-                        <textarea id="description" name="description" rows="4" required><?php echo htmlspecialchars($event['description']); ?></textarea>
-                    </div>
-                    
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="event_date">Event Date & Time *</label>
-                            <input type="datetime-local" id="event_date" name="event_date" value="<?php echo date('Y-m-d\TH:i', strtotime($event['event_date'])); ?>" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="capacity">Capacity *</label>
-                            <input type="number" id="capacity" name="capacity" min="1" value="<?php echo (int)$event['capacity']; ?>" required>
-                        </div>
-                    </div>
-                    
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="location">Location *</label>
-                            <input type="text" id="location" name="location" value="<?php echo htmlspecialchars($event['location']); ?>" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="status">Status *</label>
-                            <select id="status" name="status" required>
-                                <option value="upcoming" <?php echo $event['status'] === 'upcoming' ? 'selected' : ''; ?>>Upcoming</option>
-                                <option value="ongoing" <?php echo $event['status'] === 'ongoing' ? 'selected' : ''; ?>>Ongoing</option>
-                                <option value="completed" <?php echo $event['status'] === 'completed' ? 'selected' : ''; ?>>Completed</option>
-                            </select>
-                        </div>
-                    </div>
-                    
-                    <div class="form-actions">
-                        <button type="submit" class="btn btn-primary">Update Event</button>
-                        <a href="events.php" class="btn btn-secondary">Cancel</a>
-                    </div>
-                </form>
-            </div>
         </div>
     </div>
 
-    <style>
-    .event-form {
-        max-width: 800px;
-        margin: 0 auto;
-    }
-    
-    .form-group {
-        margin-bottom: 20px;
-    }
-    
-    .form-row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 20px;
-    }
-    
-    label {
-        display: block;
-        margin-bottom: 5px;
-        font-weight: 500;
-    }
-    
-    input[type="text"],
-    input[type="datetime-local"],
-    input[type="number"],
-    textarea,
-    select {
-        width: 100%;
-        padding: 8px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 1em;
-    }
-    
-    textarea {
-        resize: vertical;
-    }
-    
-    .form-actions {
-        display: flex;
-        gap: 10px;
-        margin-top: 30px;
-    }
-    
-    .error-list {
-        margin: 0;
-        padding-left: 20px;
-    }
-    
-    .error-list li {
-        margin-bottom: 5px;
-    }
-    
-    @media (max-width: 768px) {
-        .form-row {
-            grid-template-columns: 1fr;
-        }
-    }
-    </style>
+    <div class="container">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h1>Edit Event</h1>
+            <a href="events.php" class="btn btn-secondary">Back to Events</a>
+        </div>
+
+        <?php if ($message): ?>
+            <div class="alert alert-success"><?php echo $message; ?></div>
+        <?php endif; ?>
+
+        <?php if (!empty($errors)): ?>
+            <div class="alert alert-danger">
+                <ul class="mb-0">
+                    <?php foreach ($errors as $error): ?>
+                        <li><?php echo $error; ?></li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Edit Event Details</h3>
+                <p class="text-muted mb-0">You can only edit events that are pending approval.</p>
+            </div>
+            <form id="eventForm" method="POST" action="">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="form-group">
+                                <label for="title" class="form-label">Event Title *</label>
+                                <input type="text" id="title" name="title" class="form-control" 
+                                       value="<?php echo htmlspecialchars($event['title']); ?>" required>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-group">
+                                <label for="capacity" class="form-label">Capacity</label>
+                                <input type="number" id="capacity" name="capacity" class="form-control" 
+                                       value="<?php echo htmlspecialchars($event['capacity']); ?>" 
+                                       placeholder="Leave empty for unlimited">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="description" class="form-label">Event Description *</label>
+                        <textarea id="description" name="description" class="form-control" rows="4" required><?php echo htmlspecialchars($event['description']); ?></textarea>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="event_date" class="form-label">Event Date *</label>
+                                <input type="date" id="event_date" name="event_date" class="form-control" 
+                                       value="<?php echo htmlspecialchars($event['event_date']); ?>" 
+                                       min="<?php echo date('Y-m-d'); ?>" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="event_time" class="form-label">Event Time *</label>
+                                <input type="time" id="event_time" name="event_time" class="form-control" 
+                                       value="<?php echo htmlspecialchars($event['event_time']); ?>" required>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="location" class="form-label">Event Location *</label>
+                        <input type="text" id="location" name="location" class="form-control" 
+                               value="<?php echo htmlspecialchars($event['location']); ?>" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Event Categories</label>
+                        <div class="row">
+                            <?php foreach ($categories as $category): ?>
+                            <div class="col-md-4">
+                                <label class="form-label">
+                                    <input type="checkbox" name="categories[]" value="<?php echo $category['category_id']; ?>" 
+                                           <?php echo in_array($category['category_id'], $selected_categories_array) ? 'checked' : ''; ?>>
+                                    <?php echo htmlspecialchars($category['category_name']); ?>
+                                </label>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-primary">Update Event</button>
+                    <a href="events.php" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <footer id="contact" class="footer" style="width:100vw;">
+      <div class="footer-content">
+        <img src="../images/UniLogo.png" class="university-logo" alt="University Logo">
+        <div class="contact">
+          <strong>LIM EN DHONG</strong>
+          <p>
+            A23CS0239<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            limdhong@graduate.utm.my
+          </p>
+        </div>
+        <div class="contact">
+          <strong>NG JIN EN</strong>
+          <p>
+            A23CS0146<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            ngjinen@graduate.utm.my
+          </p>
+        </div>
+        <div class="contact">
+          <strong>YEO WERN MIN</strong>
+          <p>
+            A23CS0285<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            yeomin@graduate.utm.my
+          </p>
+        </div>
+      </div>
+        
+    <div class="landing-footer" style="text-align:center;">
+        &copy; <?php echo date('Y'); ?> Event Management System by Group BlaBlaBla
+    </div>
+    </footer>
+    <script src="../assets/js/validation.js"></script>
+    <script>
+        // Set minimum date to today
+        document.getElementById('event_date').min = new Date().toISOString().split('T')[0];
+    </script>
 </body>
 </html> 

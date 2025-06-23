@@ -1,43 +1,45 @@
 <?php
 require_once '../includes/functions.php';
-requireLevel('2'); // Event Organizer only
+requireLevel('1'); // Admin only
 
 $pdo = getDBConnection();
-$user_id = $_SESSION['user_id'];
 
 $action = $_GET['action'] ?? 'list';
 $message = '';
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    if ($action == 'delete') {
+    if ($action == 'approve' || $action == 'reject') {
         $event_id = $_POST['event_id'];
+        $status = $action == 'approve' ? 'approved' : 'rejected';
         
-        // Verify the event belongs to this organizer
-        $stmt = $pdo->prepare("SELECT event_id FROM events WHERE event_id = ? AND created_by = ?");
-        $stmt->execute([$event_id, $user_id]);
-        if ($stmt->fetch()) {
-            try {
-                $stmt = $pdo->prepare("DELETE FROM events WHERE event_id = ? AND created_by = ?");
-                $stmt->execute([$event_id, $user_id]);
-                $message = 'Event deleted successfully!';
-            } catch (Exception $e) {
-                $errors[] = 'Error deleting event: ' . $e->getMessage();
-            }
-        } else {
-            $errors[] = 'You can only delete your own events.';
+        try {
+            $stmt = $pdo->prepare("UPDATE events SET status = ? WHERE event_id = ?");
+            $stmt->execute([$status, $event_id]);
+            $message = "Event " . $status . " successfully!";
+        } catch (Exception $e) {
+            $errors[] = 'Error updating event: ' . $e->getMessage();
+        }
+    } elseif ($action == 'delete') {
+        $event_id = $_POST['event_id'];
+        try {
+            $stmt = $pdo->prepare("DELETE FROM events WHERE event_id = ?");
+            $stmt->execute([$event_id]);
+            $message = 'Event deleted successfully!';
+        } catch (Exception $e) {
+            $errors[] = 'Error deleting event: ' . $e->getMessage();
         }
     }
 }
 
-// Get events for this organizer
+// Get all events for listing
 $search = $_GET['search'] ?? '';
 $status_filter = $_GET['status'] ?? '';
 $sort = $_GET['sort'] ?? 'created_at';
 $order = $_GET['order'] ?? 'DESC';
 
-$where_conditions = ["e.created_by = ?"];
-$params = [$user_id];
+$where_conditions = [];
+$params = [];
 
 if (!empty($search)) {
     $where_conditions[] = "(e.title LIKE ? OR e.description LIKE ? OR e.location LIKE ?)";
@@ -49,27 +51,28 @@ if (!empty($status_filter)) {
     $params[] = $status_filter;
 }
 
-$where_clause = "WHERE " . implode(' AND ', $where_conditions);
+$where_clause = '';
+if (!empty($where_conditions)) {
+    $where_clause = "WHERE " . implode(' AND ', $where_conditions);
+}
 
-$stmt = $pdo->prepare("SELECT e.*, 
-                              (SELECT COUNT(*) FROM event_registrations WHERE event_id = e.event_id) as registration_count
+$stmt = $pdo->prepare("SELECT e.*, u.name as organizer_name 
                        FROM events e 
+                       LEFT JOIN users u ON e.created_by = u.user_id 
                        $where_clause 
                        ORDER BY $sort $order");
 $stmt->execute($params);
 $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get statistics for this organizer
-$stmt = $pdo->prepare("SELECT status, COUNT(*) as count FROM events WHERE created_by = ? GROUP BY status");
-$stmt->execute([$user_id]);
+// Get statistics
+$stmt = $pdo->query("SELECT status, COUNT(*) as count FROM events GROUP BY status");
 $status_stats = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $stats = [];
 foreach ($status_stats as $stat) {
     $stats[$stat['status']] = $stat['count'];
 }
-
 $user = getUserById($_SESSION['user_id']);
-$profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_picture'] : '../images/organizer.png';
+$profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_picture'] : '../images/admin.png';
 ?>
 
 <!DOCTYPE html>
@@ -77,27 +80,26 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Events - Event Organizer Dashboard</title>
+    <title>Admin Dashboard - Event Management System</title>
     <link rel="stylesheet" href="../assets/css/style.css">
 </head>
 <body>
-<div class="header">
+    <div class="header">
         <div class="navbar" style="display: flex; align-items: center; justify-content: space-between; padding: 0 32px;">
             <!-- Left: Profile and Title -->
             <div style="display: flex; align-items: center; gap: 16px;">
                 <img src="<?php echo htmlspecialchars($profile_picture); ?>" alt="Profile" style="width:56px;height:56px;border-radius:50%;background:#fff;">
                 <div style="display: flex; flex-direction: column;">
-                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Organizer</span>
+                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Admin</span>
                     <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Dashboard</span>
                 </div>
             </div>
             <!-- Right: Navigation Links -->
             <ul class="navbar-nav" style="display: flex; gap: 32px; list-style: none; margin: 0; padding: 0;">
                 <li><a href="dashboard.php" class="nav-link" style="color: #fff; font-weight: 500;">Dashboard</a></li>
-                <li><a href="events.php" class="nav-link" style="color: #fff; font-weight: 500;">My Events</a></li>
-                <li><a href="create_event.php" class="nav-link" style="color: #fff; font-weight: 500;">Create Event</a></li>
-                <li><a href="registrations.php" class="nav-link" style="color: #fff; font-weight: 500;">Registrations</a></li>
-                <li><a href="analytics.php" class="nav-link" style="color: #fff; font-weight: 500;">Analytics</a></li>
+                <li><a href="users.php" class="nav-link" style="color: #fff; font-weight: 500;">User Management</a></li>
+                <li><a href="events.php" class="nav-link" style="color: #fff; font-weight: 500;">Event Management</a></li>
+                <li><a href="reports.php" class="nav-link" style="color: #fff; font-weight: 500;">Reports</a></li>
                 <li><a href="profile.php" class="nav-link" style="color: #fff; font-weight: 500;">Profile</a></li>
                 <li><a href="../logout.php" class="nav-link" style="color: #fff; font-weight: 500;">Logout</a></li>
             </ul>
@@ -106,22 +108,11 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
 
     <div class="container">
         <div class="d-flex justify-content-between align-items-center mb-3">
-            <h1>My Events</h1>
-            <a href="create_event.php" class="btn btn-success">Create New Event</a>
+            <h1>Manage Events</h1>
         </div>
 
         <?php if ($message): ?>
             <div class="alert alert-success"><?php echo $message; ?></div>
-        <?php endif; ?>
-
-        <?php if (!empty($errors)): ?>
-            <div class="alert alert-danger">
-                <ul class="mb-0">
-                    <?php foreach ($errors as $error): ?>
-                        <li><?php echo $error; ?></li>
-                    <?php endforeach; ?>
-                </ul>
-            </div>
         <?php endif; ?>
 
         <!-- Statistics -->
@@ -196,10 +187,10 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
                     <thead>
                         <tr>
                             <th>Title</th>
+                            <th>Organizer</th>
                             <th>Date & Time</th>
                             <th>Location</th>
                             <th>Capacity</th>
-                            <th>Registrations</th>
                             <th>Status</th>
                             <th>Created</th>
                             <th>Actions</th>
@@ -212,15 +203,13 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
                                 <strong><?php echo htmlspecialchars($event['title']); ?></strong>
                                 <br><small class="text-muted"><?php echo htmlspecialchars(substr($event['description'], 0, 100)) . '...'; ?></small>
                             </td>
+                            <td><?php echo htmlspecialchars($event['organizer_name']); ?></td>
                             <td>
                                 <?php echo formatDate($event['event_date']); ?>
                                 <br><small class="text-muted"><?php echo date('g:i A', strtotime($event['event_time'])); ?></small>
                             </td>
                             <td><?php echo htmlspecialchars($event['location']); ?></td>
                             <td><?php echo $event['capacity'] ? $event['capacity'] : 'Unlimited'; ?></td>
-                            <td>
-                                <span class="badge badge-info"><?php echo $event['registration_count']; ?></span>
-                            </td>
                             <td>
                                 <span class="badge badge-<?php 
                                     echo $event['status'] == 'approved' ? 'success' : 
@@ -232,11 +221,16 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
                             </td>
                             <td><?php echo formatDate($event['created_at']); ?></td>
                             <td>
-                                <a href="view_event.php?id=<?php echo $event['event_id']; ?>" class="btn btn-info btn-sm">View</a>
                                 <?php if ($event['status'] == 'pending'): ?>
-                                    <a href="edit_event.php?id=<?php echo $event['event_id']; ?>" class="btn btn-warning btn-sm">Edit</a>
+                                    <form method="POST" action="?action=approve" style="display: inline;">
+                                        <input type="hidden" name="event_id" value="<?php echo $event['event_id']; ?>">
+                                        <button type="submit" class="btn btn-success btn-sm">Approve</button>
+                                    </form>
+                                    <form method="POST" action="?action=reject" style="display: inline;">
+                                        <input type="hidden" name="event_id" value="<?php echo $event['event_id']; ?>">
+                                        <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                                    </form>
                                 <?php endif; ?>
-                                <a href="registrations.php?event_id=<?php echo $event['event_id']; ?>" class="btn btn-success btn-sm">Registrations</a>
                                 <form method="POST" action="?action=delete" style="display: inline;" 
                                       onsubmit="return confirm('Are you sure you want to delete this event?')">
                                     <input type="hidden" name="event_id" value="<?php echo $event['event_id']; ?>">
@@ -249,16 +243,6 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
                 </table>
             </div>
         </div>
-
-        <?php if (empty($events)): ?>
-            <div class="card">
-                <div class="card-body text-center">
-                    <h4>No events found</h4>
-                    <p class="text-muted">You haven't created any events yet.</p>
-                    <a href="create_event.php" class="btn btn-primary">Create Your First Event</a>
-                </div>
-            </div>
-        <?php endif; ?>
     </div>
 
     <footer id="contact" class="footer" style="width:100vw;">

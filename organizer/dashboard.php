@@ -1,138 +1,58 @@
 <?php
-session_start();
-require_once '../config/database.php';
+require_once '../includes/functions.php';
+requireLevel('2'); // Event Organizer only
 
-// Check if user is logged in and is an organizer
-if (!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true || $_SESSION["role"] !== "organizer") {
-    header("location: ../login.php");
-    exit;
-}
+$pdo = getDBConnection();
+$user_id = $_SESSION['user_id'];
 
-// Get organizer information
-$organizer_id = $_SESSION["user_id"];
-$organizer_name = $_SESSION["name"];
+// Get statistics for this organizer
+$stats = [];
 
-// Handle event management actions
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    if (isset($_POST["action"])) {
-        switch ($_POST["action"]) {
-            case "create_event":
-                $title = trim($_POST["title"]);
-                $description = trim($_POST["description"]);
-                $event_date = trim($_POST["event_date"]);
-                $location = trim($_POST["location"]);
-                $capacity = (int)$_POST["capacity"];
-                
-                $sql = "INSERT INTO events (title, description, event_date, location, capacity, organizer_id) 
-                        VALUES (?, ?, ?, ?, ?, ?)";
-                $stmt = mysqli_prepare($conn, $sql);
-                mysqli_stmt_bind_param($stmt, "ssssii", $title, $description, $event_date, $location, $capacity, $organizer_id);
-                
-                if (mysqli_stmt_execute($stmt)) {
-                    $_SESSION["success"] = "Event created successfully!";
-                } else {
-                    $_SESSION["error"] = "Failed to create event.";
-                }
-                break;
-                
-            case "edit_event":
-                $event_id = (int)$_POST["event_id"];
-                $title = trim($_POST["title"]);
-                $description = trim($_POST["description"]);
-                $event_date = trim($_POST["event_date"]);
-                $location = trim($_POST["location"]);
-                $capacity = (int)$_POST["capacity"];
-                $status = trim($_POST["status"]);
-                
-                $sql = "UPDATE events 
-                        SET title = ?, description = ?, event_date = ?, location = ?, capacity = ?, status = ? 
-                        WHERE event_id = ? AND organizer_id = ?";
-                $stmt = mysqli_prepare($conn, $sql);
-                mysqli_stmt_bind_param($stmt, "ssssissi", $title, $description, $event_date, $location, $capacity, $status, $event_id, $organizer_id);
-                
-                if (mysqli_stmt_execute($stmt)) {
-                    $_SESSION["success"] = "Event updated successfully!";
-                } else {
-                    $_SESSION["error"] = "Failed to update event.";
-                }
-                break;
-                
-            case "delete_event":
-                $event_id = (int)$_POST["event_id"];
-                
-                $sql = "DELETE FROM events WHERE event_id = ? AND organizer_id = ?";
-                $stmt = mysqli_prepare($conn, $sql);
-                mysqli_stmt_bind_param($stmt, "ii", $event_id, $organizer_id);
-                
-                if (mysqli_stmt_execute($stmt)) {
-                    $_SESSION["success"] = "Event deleted successfully!";
-                } else {
-                    $_SESSION["error"] = "Failed to delete event.";
-                }
-                break;
+// Total events created by this organizer
+$stmt = $pdo->prepare("SELECT COUNT(*) as count FROM events WHERE created_by = ?");
+$stmt->execute([$user_id]);
+$stats['total_events'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
-            case "update_registration":
-                $registration_id = (int)$_POST["registration_id"];
-                $status = trim($_POST["status"]);
-                
-                // Verify the registration belongs to an event organized by this organizer
-                $sql = "SELECT r.registration_id 
-                        FROM registrations r 
-                        JOIN events e ON r.event_id = e.event_id 
-                        WHERE r.registration_id = ? AND e.organizer_id = ?";
-                $stmt = mysqli_prepare($conn, $sql);
-                mysqli_stmt_bind_param($stmt, "ii", $registration_id, $organizer_id);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_store_result($stmt);
-                
-                if (mysqli_stmt_num_rows($stmt) > 0) {
-                    $sql = "UPDATE registrations SET status = ? WHERE registration_id = ?";
-                    $stmt = mysqli_prepare($conn, $sql);
-                    mysqli_stmt_bind_param($stmt, "si", $status, $registration_id);
-                    
-                    if (mysqli_stmt_execute($stmt)) {
-                        $_SESSION["success"] = "Registration status updated successfully!";
-                    } else {
-                        $_SESSION["error"] = "Failed to update registration status.";
-                    }
-                } else {
-                    $_SESSION["error"] = "Invalid registration.";
-                }
-                break;
-        }
-        
-        // Redirect to prevent form resubmission
-        header("Location: " . $_SERVER['PHP_SELF']);
-        exit();
-    }
-}
+// Pending events
+$stmt = $pdo->prepare("SELECT COUNT(*) as count FROM events WHERE created_by = ? AND status = 'pending'");
+$stmt->execute([$user_id]);
+$stats['pending_events'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
-// Get organizer's events
-$events = [];
-$sql = "SELECT * FROM events WHERE organizer_id = ? ORDER BY event_date DESC";
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, "i", $organizer_id);
-mysqli_stmt_execute($stmt);
-$result = mysqli_stmt_get_result($stmt);
-while ($row = mysqli_fetch_assoc($result)) {
-    $events[] = $row;
-}
+// Approved events
+$stmt = $pdo->prepare("SELECT COUNT(*) as count FROM events WHERE created_by = ? AND status = 'approved'");
+$stmt->execute([$user_id]);
+$stats['approved_events'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
 
-// Get event registrations
-$registrations = [];
-$sql = "SELECT r.*, e.title as event_title, u.name as student_name 
-        FROM registrations r 
-        JOIN events e ON r.event_id = e.event_id 
-        JOIN users u ON r.student_id = u.user_id 
-        WHERE e.organizer_id = ? 
-        ORDER BY r.registration_date DESC";
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, "i", $organizer_id);
-mysqli_stmt_execute($stmt);
-$result = mysqli_stmt_get_result($stmt);
-while ($row = mysqli_fetch_assoc($result)) {
-    $registrations[] = $row;
-}
+// Total registrations for this organizer's events
+$stmt = $pdo->prepare("SELECT COUNT(*) as count FROM event_registrations er 
+                       JOIN events e ON er.event_id = e.event_id 
+                       WHERE e.created_by = ?");
+$stmt->execute([$user_id]);
+$stats['total_registrations'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
+
+// Recent events by this organizer
+$stmt = $pdo->prepare("SELECT e.*, 
+                              (SELECT COUNT(*) FROM event_registrations WHERE event_id = e.event_id) as registration_count
+                       FROM events e 
+                       WHERE e.created_by = ? 
+                       ORDER BY e.created_at DESC 
+                       LIMIT 5");
+$stmt->execute([$user_id]);
+$recent_events = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Recent registrations for this organizer's events
+$stmt = $pdo->prepare("SELECT er.*, e.title as event_title, u.name as student_name 
+                       FROM event_registrations er 
+                       JOIN events e ON er.event_id = e.event_id 
+                       JOIN users u ON er.user_id = u.user_id 
+                       WHERE e.created_by = ? 
+                       ORDER BY er.registration_date DESC 
+                       LIMIT 5");
+$stmt->execute([$user_id]);
+$recent_registrations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$user = getUserById($_SESSION['user_id']);
+$profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_picture'] : '../images/organizer.png';
 ?>
 
 <!DOCTYPE html>
@@ -140,359 +60,239 @@ while ($row = mysqli_fetch_assoc($result)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Organizer Dashboard - Student Event Management System</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link href="../assets/css/style.css" rel="stylesheet">
+    <title>Event Organizer Dashboard - Event Management System</title>
+    <link rel="stylesheet" href="../assets/css/style.css">
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="#">Organizer Dashboard</a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav me-auto">
-                    <li class="nav-item">
-                        <a class="nav-link active" href="#events">My Events</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#registrations">Registrations</a>
-                    </li>
-                </ul>
-                <div class="d-flex">
-                    <span class="navbar-text me-3">
-                        Welcome, <?php echo htmlspecialchars($organizer_name); ?>
-                    </span>
-                    <a href="../logout.php" class="btn btn-light">Logout</a>
+    <div class="header">
+        <div class="navbar" style="display: flex; align-items: center; justify-content: space-between; padding: 0 32px;">
+            <!-- Left: Profile and Title -->
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <img src="<?php echo htmlspecialchars($profile_picture); ?>" alt="Profile" style="width:56px;height:56px;border-radius:50%;background:#fff;">
+                <div style="display: flex; flex-direction: column;">
+                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Organizer</span>
+                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Dashboard</span>
                 </div>
             </div>
+            <!-- Right: Navigation Links -->
+            <ul class="navbar-nav" style="display: flex; gap: 32px; list-style: none; margin: 0; padding: 0;">
+                <li><a href="dashboard.php" class="nav-link" style="color: #fff; font-weight: 500;">Dashboard</a></li>
+                <li><a href="events.php" class="nav-link" style="color: #fff; font-weight: 500;">My Events</a></li>
+                <li><a href="create_event.php" class="nav-link" style="color: #fff; font-weight: 500;">Create Event</a></li>
+                <li><a href="registrations.php" class="nav-link" style="color: #fff; font-weight: 500;">Registrations</a></li>
+                <li><a href="analytics.php" class="nav-link" style="color: #fff; font-weight: 500;">Analytics</a></li>
+                <li><a href="profile.php" class="nav-link" style="color: #fff; font-weight: 500;">Profile</a></li>
+                <li><a href="../logout.php" class="nav-link" style="color: #fff; font-weight: 500;">Logout</a></li>
+            </ul>
         </div>
-    </nav>
+    </div>
 
-    <div class="container mt-4">
-        <?php if (isset($_SESSION["success"])): ?>
-            <div class="alert alert-success">
-                <?php 
-                echo $_SESSION["success"];
-                unset($_SESSION["success"]);
-                ?>
+    <div class="container">
+        <h1 class="mb-3">Welcome, <?php echo htmlspecialchars($_SESSION['name']); ?>!</h1>
+        
+        <!-- Statistics Grid -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number"><?php echo $stats['total_events']; ?></div>
+                <div class="stat-label">Total Events</div>
             </div>
-        <?php endif; ?>
-
-        <?php if (isset($_SESSION["error"])): ?>
-            <div class="alert alert-danger">
-                <?php 
-                echo $_SESSION["error"];
-                unset($_SESSION["error"]);
-                ?>
+            <div class="stat-card">
+                <div class="stat-number"><?php echo $stats['approved_events']; ?></div>
+                <div class="stat-label">Approved Events</div>
             </div>
-        <?php endif; ?>
-
-        <!-- Event Management Section -->
-        <section id="events" class="mb-5">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2>My Events</h2>
-                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createEventModal">
-                    <i class="fas fa-plus"></i> Create Event
-                </button>
+            <div class="stat-card">
+                <div class="stat-number"><?php echo $stats['pending_events']; ?></div>
+                <div class="stat-label">Pending Events</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-number"><?php echo $stats['total_registrations']; ?></div>
+                <div class="stat-label">Total Registrations</div>
+            </div>
+        </div>
 
-            <div class="card">
-                <div class="card-body">
+        <div class="row">
+            <!-- Recent Events -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">My Recent Events</h3>
+                    </div>
                     <div class="table-responsive">
-                        <table class="table table-striped">
+                        <table class="table">
                             <thead>
                                 <tr>
-                                    <th>ID</th>
                                     <th>Title</th>
                                     <th>Date</th>
-                                    <th>Location</th>
-                                    <th>Capacity</th>
                                     <th>Status</th>
-                                    <th>Actions</th>
+                                    <th>Registrations</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php foreach ($events as $event): ?>
+                                <?php foreach ($recent_events as $event): ?>
                                 <tr>
-                                    <td><?php echo $event["event_id"]; ?></td>
-                                    <td><?php echo htmlspecialchars($event["title"]); ?></td>
-                                    <td><?php echo htmlspecialchars($event["event_date"]); ?></td>
-                                    <td><?php echo htmlspecialchars($event["location"]); ?></td>
-                                    <td><?php echo $event["capacity"]; ?></td>
-                                    <td><?php echo htmlspecialchars($event["status"]); ?></td>
+                                    <td><?php echo htmlspecialchars($event['title']); ?></td>
+                                    <td><?php echo formatDate($event['event_date']); ?></td>
                                     <td>
-                                        <button class="btn btn-sm btn-primary" onclick="editEvent(<?php echo htmlspecialchars(json_encode($event)); ?>)">
-                                            <i class="fas fa-edit"></i>
-                                        </button>
-                                        <button class="btn btn-sm btn-danger" onclick="deleteEvent(<?php echo $event["event_id"]; ?>)">
-                                            <i class="fas fa-trash"></i>
-                                        </button>
+                                        <span class="badge badge-<?php 
+                                            echo $event['status'] == 'approved' ? 'success' : 
+                                                ($event['status'] == 'pending' ? 'warning' : 
+                                                ($event['status'] == 'rejected' ? 'danger' : 'secondary')); 
+                                        ?>">
+                                            <?php echo ucfirst($event['status']); ?>
+                                        </span>
                                     </td>
+                                    <td><?php echo $event['registration_count']; ?></td>
                                 </tr>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
+                    <div class="card-footer">
+                        <a href="events.php" class="btn btn-primary">View All Events</a>
+                    </div>
                 </div>
             </div>
-        </section>
 
-        <!-- Registration Management Section -->
-        <section id="registrations" class="mb-5">
-            <h2 class="mb-4">Event Registrations</h2>
-            <div class="card">
-                <div class="card-body">
+            <!-- Recent Registrations -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Recent Registrations</h3>
+                    </div>
                     <div class="table-responsive">
-                        <table class="table table-striped">
+                        <table class="table">
                             <thead>
                                 <tr>
-                                    <th>ID</th>
                                     <th>Student</th>
                                     <th>Event</th>
-                                    <th>Registration Date</th>
                                     <th>Status</th>
-                                    <th>Actions</th>
+                                    <th>Date</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php foreach ($registrations as $registration): ?>
+                                <?php foreach ($recent_registrations as $registration): ?>
                                 <tr>
-                                    <td><?php echo $registration["registration_id"]; ?></td>
-                                    <td><?php echo htmlspecialchars($registration["student_name"]); ?></td>
-                                    <td><?php echo htmlspecialchars($registration["event_title"]); ?></td>
-                                    <td><?php echo htmlspecialchars($registration["registration_date"]); ?></td>
-                                    <td><?php echo htmlspecialchars($registration["status"]); ?></td>
+                                    <td><?php echo htmlspecialchars($registration['student_name']); ?></td>
+                                    <td><?php echo htmlspecialchars($registration['event_title']); ?></td>
                                     <td>
-                                        <div class="btn-group">
-                                            <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#viewRegistrationModal" onclick="viewRegistrationDetails(<?php echo htmlspecialchars(json_encode($registration)); ?>)">
-                                                <i class="fas fa-eye"></i>
-                                            </button>
-                                            <?php if ($registration["status"] == "pending"): ?>
-                                            <button class="btn btn-sm btn-success" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'approved')">
-                                                <i class="fas fa-check"></i>
-                                            </button>
-                                            <button class="btn btn-sm btn-danger" onclick="updateRegistrationStatus(<?php echo $registration["registration_id"]; ?>, 'rejected')">
-                                                <i class="fas fa-times"></i>
-                                            </button>
-                                            <?php endif; ?>
-                                        </div>
+                                        <span class="badge badge-<?php 
+                                            echo $registration['status'] == 'attended' ? 'success' : 
+                                                ($registration['status'] == 'registered' ? 'info' : 'danger'); 
+                                        ?>">
+                                            <?php echo ucfirst($registration['status']); ?>
+                                        </span>
                                     </td>
+                                    <td><?php echo formatDate($registration['registration_date']); ?></td>
                                 </tr>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
-                </div>
-            </div>
-        </section>
-    </div>
-
-    <!-- Create Event Modal -->
-    <div class="modal fade" id="createEventModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Create New Event</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <form action="" method="POST">
-                    <div class="modal-body">
-                        <input type="hidden" name="action" value="create_event">
-                        <div class="mb-3">
-                            <label class="form-label">Title</label>
-                            <input type="text" class="form-control" name="title" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Description</label>
-                            <textarea class="form-control" name="description" rows="3" required></textarea>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Event Date</label>
-                            <input type="datetime-local" class="form-control" name="event_date" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Location</label>
-                            <input type="text" class="form-control" name="location" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Capacity</label>
-                            <input type="number" class="form-control" name="capacity" min="1" required>
-                        </div>
+                    <div class="card-footer">
+                        <a href="registrations.php" class="btn btn-primary">View All Registrations</a>
                     </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                        <button type="submit" class="btn btn-primary">Create Event</button>
-                    </div>
-                </form>
+                </div>
             </div>
         </div>
-    </div>
 
-    <!-- Edit Event Modal -->
-    <div class="modal fade" id="editEventModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Edit Event</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <!-- Quick Actions -->
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Quick Actions</h3>
+            </div>
+            <div class="row">
+                <div class="col-md-3">
+                    <a href="create_event.php" class="btn btn-success" style="width: 100%; margin-bottom: 1rem;">
+                        Create New Event
+                    </a>
                 </div>
-                <form action="" method="POST">
-                    <div class="modal-body">
-                        <input type="hidden" name="action" value="edit_event">
-                        <input type="hidden" name="event_id" id="edit_event_id">
-                        <div class="mb-3">
-                            <label class="form-label">Title</label>
-                            <input type="text" class="form-control" name="title" id="edit_title" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Description</label>
-                            <textarea class="form-control" name="description" id="edit_description" rows="3" required></textarea>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Event Date</label>
-                            <input type="datetime-local" class="form-control" name="event_date" id="edit_event_date" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Location</label>
-                            <input type="text" class="form-control" name="location" id="edit_location" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Capacity</label>
-                            <input type="number" class="form-control" name="capacity" id="edit_capacity" min="1" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">Status</label>
-                            <select class="form-select" name="status" id="edit_status" required>
-                                <option value="upcoming">Upcoming</option>
-                                <option value="ongoing">Ongoing</option>
-                                <option value="completed">Completed</option>
-                                <option value="cancelled">Cancelled</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                        <button type="submit" class="btn btn-primary">Save Changes</button>
-                    </div>
-                </form>
+                <div class="col-md-3">
+                    <a href="events.php?status=pending" class="btn btn-warning" style="width: 100%; margin-bottom: 1rem;">
+                        View Pending Events
+                    </a>
+                </div>
+                <div class="col-md-3">
+                    <a href="analytics.php" class="btn btn-info" style="width: 100%; margin-bottom: 1rem;">
+                        View Analytics
+                    </a>
+                </div>
+                <div class="col-md-3">
+                    <a href="profile.php" class="btn btn-secondary" style="width: 100%; margin-bottom: 1rem;">
+                        Edit Profile
+                    </a>
+                </div>
             </div>
         </div>
-    </div>
 
-    <!-- Delete Event Confirmation Modal -->
-    <div class="modal fade" id="deleteEventModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Confirm Delete</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <!-- Event Status Summary -->
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Event Status Summary</h3>
+            </div>
+            <div class="row">
+                <div class="col-md-3">
+                    <div class="stat-card">
+                        <div class="stat-number"><?php echo $stats['pending_events']; ?></div>
+                        <div class="stat-label">Pending Approval</div>
+                    </div>
                 </div>
-                <div class="modal-body">
-                    <p>Are you sure you want to delete this event?</p>
+                <div class="col-md-3">
+                    <div class="stat-card">
+                        <div class="stat-number"><?php echo $stats['approved_events']; ?></div>
+                        <div class="stat-label">Approved</div>
+                    </div>
                 </div>
-                <div class="modal-footer">
-                    <form action="" method="POST">
-                        <input type="hidden" name="action" value="delete_event">
-                        <input type="hidden" name="event_id" id="delete_event_id">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-danger">Delete</button>
-                    </form>
+                <div class="col-md-3">
+                    <div class="stat-card">
+                        <div class="stat-number"><?php echo $stats['total_events'] - $stats['pending_events'] - $stats['approved_events']; ?></div>
+                        <div class="stat-label">Rejected/Cancelled</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-card">
+                        <div class="stat-number"><?php echo $stats['total_registrations']; ?></div>
+                        <div class="stat-label">Total Participants</div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- View Registration Modal -->
-    <div class="modal fade" id="viewRegistrationModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Registration Details</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">Student Name</label>
-                        <p id="view_student_name"></p>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">Event Title</label>
-                        <p id="view_event_title"></p>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">Registration Date</label>
-                        <p id="view_registration_date"></p>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-bold">Status</label>
-                        <p id="view_status"></p>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                </div>
-            </div>
+    <footer id="contact" class="footer" style="width:100vw;">
+      <div class="footer-content">
+        <img src="../images/UniLogo.png" class="university-logo" alt="University Logo">
+        <div class="contact">
+          <strong>LIM EN DHONG</strong>
+          <p>
+            A23CS0239<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            limdhong@graduate.utm.my
+          </p>
         </div>
-    </div>
-
-    <!-- Update Registration Status Modal -->
-    <div class="modal fade" id="updateRegistrationModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Update Registration Status</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="POST">
-                    <div class="modal-body">
-                        <input type="hidden" name="action" value="update_registration">
-                        <input type="hidden" name="registration_id" id="update_registration_id">
-                        <input type="hidden" name="status" id="update_status">
-                        <p>Are you sure you want to <span id="status_action"></span> this registration?</p>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Confirm</button>
-                    </div>
-                </form>
-            </div>
+        <div class="contact">
+          <strong>NG JIN EN</strong>
+          <p>
+            A23CS0146<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            ngjinen@graduate.utm.my
+          </p>
         </div>
+        <div class="contact">
+          <strong>YEO WERN MIN</strong>
+          <p>
+            A23CS0285<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            yeomin@graduate.utm.my
+          </p>
+        </div>
+      </div>
+        
+    <div class="landing-footer" style="text-align:center;">
+        &copy; <?php echo date('Y'); ?> Event Management System by Group BlaBlaBla
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        function editEvent(event) {
-            document.getElementById('edit_event_id').value = event.event_id;
-            document.getElementById('edit_title').value = event.title;
-            document.getElementById('edit_description').value = event.description;
-            document.getElementById('edit_event_date').value = event.event_date;
-            document.getElementById('edit_location').value = event.location;
-            document.getElementById('edit_capacity').value = event.capacity;
-            document.getElementById('edit_status').value = event.status;
-            new bootstrap.Modal(document.getElementById('editEventModal')).show();
-        }
-
-        function deleteEvent(eventId) {
-            document.getElementById('delete_event_id').value = eventId;
-            new bootstrap.Modal(document.getElementById('deleteEventModal')).show();
-        }
-
-        function viewRegistrationDetails(registration) {
-            document.getElementById('view_student_name').textContent = registration.student_name;
-            document.getElementById('view_event_title').textContent = registration.event_title;
-            document.getElementById('view_registration_date').textContent = registration.registration_date;
-            document.getElementById('view_status').textContent = registration.status;
-        }
-
-        function updateRegistrationStatus(registrationId, status) {
-            document.getElementById('update_registration_id').value = registrationId;
-            document.getElementById('update_status').value = status;
-            document.getElementById('status_action').textContent = status === 'approved' ? 'approve' : 'reject';
-            new bootstrap.Modal(document.getElementById('updateRegistrationModal')).show();
-        }
-    </script>
+    </footer>
 </body>
 </html> 

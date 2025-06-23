@@ -1,332 +1,215 @@
 <?php
-require_once '../config/database.php';
-require_once '../config/session.php';
+require_once '../includes/functions.php';
+requireLevel('2'); // Organizer only
 
-// Require organizer role
-requireRole('organizer');
+$pdo = getDBConnection();
+$user_id = $_SESSION['user_id'];
 
 // Get event ID from URL
-$event_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
-
-// Get event details
-$sql = "SELECT e.*, 
-        (SELECT COUNT(*) FROM registrations WHERE event_id = e.event_id) as registration_count,
-        (SELECT COUNT(*) FROM registrations WHERE event_id = e.event_id AND status = 'approved') as approved_count
-        FROM events e
-        WHERE e.event_id = ? AND e.organizer_id = ?";
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, "ii", $event_id, $_SESSION['user_id']);
-mysqli_stmt_execute($stmt);
-$result = $stmt->get_result();
-
-if (mysqli_num_rows($result) === 0) {
-    $_SESSION['error_message'] = "Event not found or unauthorized access.";
-    header("Location: events.php");
-    exit();
+$event_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+if (!$event_id) {
+    echo "<div class='alert alert-danger'>Invalid event ID.</div>";
+    exit;
 }
 
-$event = mysqli_fetch_assoc($result);
+// Fetch event details
+$stmt = $pdo->prepare("SELECT e.*, u.name AS organizer_name, u.email AS organizer_email
+                       FROM events e
+                       JOIN users u ON e.created_by = u.user_id
+                       WHERE e.event_id = ?");
+$stmt->execute([$event_id]);
+$event = $stmt->fetch(PDO::FETCH_ASSOC);
 
-// Get registrations
-$sql = "SELECT r.*, s.matrix_no, u.name as student_name, u.email as student_email
-        FROM registrations r
-        JOIN students s ON r.student_id = s.user_id
-        JOIN users u ON s.user_id = u.id
-        WHERE r.event_id = ?
-        ORDER BY r.registration_date DESC";
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, "i", $event_id);
-mysqli_stmt_execute($stmt);
-$registrations = $stmt->get_result();
-
-// Handle registration status update
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'])) {
-    $registration_id = (int)$_POST['registration_id'];
-    $new_status = $_POST['new_status'];
-    
-    if (in_array($new_status, ['pending', 'approved', 'rejected'])) {
-        $sql = "UPDATE registrations 
-                SET status = ? 
-                WHERE registration_id = ? AND event_id = ?";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, "sii", $new_status, $registration_id, $event_id);
-        
-        if (mysqli_stmt_execute($stmt)) {
-            $_SESSION['success_message'] = "Registration status updated successfully.";
-        } else {
-            $_SESSION['error_message'] = "Error updating registration status.";
-        }
-    } else {
-        $_SESSION['error_message'] = "Invalid status.";
-    }
-    
-    header("Location: view_event.php?id=" . $event_id);
-    exit();
+if (!$event) {
+    echo "<div class='alert alert-danger'>Event not found.</div>";
+    exit;
 }
+
+// Check if the logged-in organizer is the creator of the event
+if ($event['created_by'] != $user_id) {
+    echo "<div class='alert alert-danger'>You do not have permission to view this event.</div>";
+    exit;
+}
+
+// Fetch registrations for this event
+$stmt = $pdo->prepare("SELECT er.*, u.name, u.email
+                       FROM event_registrations er
+                       JOIN users u ON er.user_id = u.user_id
+                       WHERE er.event_id = ?
+                       ORDER BY er.registration_date DESC");
+$stmt->execute([$event_id]);
+$registrations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Count registrations
+$registration_count = count($registrations);
+
+$user = getUserById($_SESSION['user_id']);
+$profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_picture'] : '../images/organizer.png';
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>View Event - Student Event Management System</title>
+    <title>View Event - Organizer</title>
     <link rel="stylesheet" href="../assets/css/style.css">
+    <style>
+        .action-btn {
+            display: block;
+            width: 140px;    
+            margin-bottom: 10px;
+            padding: 10px 0;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.05em;
+            font-weight: 500;
+            text-align: center;
+            color: #fff;
+            text-decoration: none;
+            transition: background 0.2s, box-shadow 0.2s;
+            box-shadow: 0 2px 8px rgba(106,90,249,0.08);
+            cursor: pointer;
+        }
+
+        .action-btn.view {
+            background: linear-gradient(90deg, #6a5af9 0%, #705df2 100%);
+        }
+
+        .action-btn.registrations {
+            background: linear-gradient(90deg, #17c3b2 0%, #38b6ff 100%);
+        }
+
+        .action-btn.delete {
+            background: linear-gradient(90deg, #ff5858 0%, #ff884b 100%);
+        }
+
+        .action-btn:hover {
+            opacity: 0.92;
+            box-shadow: 0 4px 16px rgba(106,90,249,0.12);
+        }
+    </style>
 </head>
 <body>
-    <div class="dashboard">
-        <div class="sidebar">
-            <h3>Organizer Panel</h3>
-            <ul>
-                <li><a href="dashboard.php">Dashboard</a></li>
-                <li><a href="events.php" class="active">Manage Events</a></li>
-                <li><a href="registrations.php">Manage Registrations</a></li>
-                <li><a href="profile.php">Profile</a></li>
-                <li><a href="../logout.php">Logout</a></li>
+<div class="header">
+        <div class="navbar" style="display: flex; align-items: center; justify-content: space-between; padding: 0 32px;">
+            <!-- Left: Profile and Title -->
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <img src="<?php echo htmlspecialchars($profile_picture); ?>" alt="Profile" style="width:56px;height:56px;border-radius:50%;background:#fff;">
+                <div style="display: flex; flex-direction: column;">
+                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Organizer</span>
+                    <span style="font-size: 1.1em; font-weight: bold; color: #fff;">Dashboard</span>
+                </div>
+            </div>
+            <!-- Right: Navigation Links -->
+            <ul class="navbar-nav" style="display: flex; gap: 32px; list-style: none; margin: 0; padding: 0;">
+                <li><a href="dashboard.php" class="nav-link" style="color: #fff; font-weight: 500;">Dashboard</a></li>
+                <li><a href="events.php" class="nav-link" style="color: #fff; font-weight: 500;">My Events</a></li>
+                <li><a href="create_event.php" class="nav-link" style="color: #fff; font-weight: 500;">Create Event</a></li>
+                <li><a href="registrations.php" class="nav-link" style="color: #fff; font-weight: 500;">Registrations</a></li>
+                <li><a href="analytics.php" class="nav-link" style="color: #fff; font-weight: 500;">Analytics</a></li>
+                <li><a href="profile.php" class="nav-link" style="color: #fff; font-weight: 500;">Profile</a></li>
+                <li><a href="../logout.php" class="nav-link" style="color: #fff; font-weight: 500;">Logout</a></li>
             </ul>
         </div>
-        
-        <div class="main-content">
-            <div class="page-header">
-                <h2>Event Details</h2>
-                <div class="header-actions">
-                    <a href="edit_event.php?id=<?php echo $event_id; ?>" class="btn btn-primary">Edit Event</a>
-                    <a href="events.php" class="btn btn-secondary">Back to Events</a>
-                </div>
-            </div>
-            
-            <?php if (isset($_SESSION['success_message'])): ?>
-                <div class="alert alert-success">
-                    <?php 
-                    echo $_SESSION['success_message'];
-                    unset($_SESSION['success_message']);
-                    ?>
-                </div>
-            <?php endif; ?>
-            
-            <?php if (isset($_SESSION['error_message'])): ?>
-                <div class="alert alert-danger">
-                    <?php 
-                    echo $_SESSION['error_message'];
-                    unset($_SESSION['error_message']);
-                    ?>
-                </div>
-            <?php endif; ?>
-            
-            <div class="card">
-                <div class="event-header">
-                    <h3><?php echo htmlspecialchars($event['title']); ?></h3>
-                    <span class="status-badge <?php echo $event['status']; ?>">
+    </div>
+
+    <div class="container">
+        <h1><?php echo htmlspecialchars($event['title']); ?></h1>
+        <div class="card mb-4">
+            <div class="card-body" >
+                <p><strong>Description:</strong> <?php echo nl2br(htmlspecialchars($event['description'])); ?></p>
+                <p><strong>Date:</strong> <?php echo formatDate($event['event_date']); ?></p>
+                <p><strong>Time:</strong> <?php echo date('g:i A', strtotime($event['event_time'])); ?></p>
+                <p><strong>Location:</strong> <?php echo htmlspecialchars($event['location']); ?></p>
+                <p><strong>Capacity:</strong> <?php echo $event['capacity']; ?></p>
+                <p><strong>Status:</strong>
+                    <span class="badge badge-<?php
+                        if ($event['status'] == 'approved') echo 'success';
+                        elseif ($event['status'] == 'pending') echo 'warning';
+                        else echo 'danger';
+                    ?>">
                         <?php echo ucfirst($event['status']); ?>
                     </span>
-                </div>
-                
-                <div class="event-details">
-                    <div class="detail-item">
-                        <label>Date & Time:</label>
-                        <span><?php echo date('F d, Y H:i', strtotime($event['event_date'])); ?></span>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label>Location:</label>
-                        <span><?php echo htmlspecialchars($event['location']); ?></span>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label>Capacity:</label>
-                        <span><?php echo $event['capacity']; ?> participants</span>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label>Registrations:</label>
-                        <span><?php echo $event['registration_count']; ?> total (<?php echo $event['approved_count']; ?> approved)</span>
-                    </div>
-                </div>
-                
-                <div class="event-description">
-                    <h4>Description</h4>
-                    <p><?php echo nl2br(htmlspecialchars($event['description'])); ?></p>
+                </p>
+                <p><strong>Organizer:</strong> <?php echo htmlspecialchars($event['organizer_name']); ?> (<?php echo htmlspecialchars($event['organizer_email']); ?>)</p>
+                <p><strong>Registrations:</strong> <?php echo $registration_count; ?></p>
+                <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 16px;">
+                    <a href="edit_event.php?id=<?php echo $event_id; ?>" class="btn btn-primary">Edit Event</a>
+                    <a href="view_event.php?id=<?php echo $event['event_id']; ?>" class="action-btn view">View</a>
+                    <a href="registrations.php?event_id=<?php echo $event['event_id']; ?>" class="action-btn registrations">Registrations</a>
+                    <a href="events.php?action=delete&id=<?php echo $event['event_id']; ?>" class="action-btn delete" onclick="return confirm('Are you sure you want to delete this event?')">Delete</a>
                 </div>
             </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h3>Registrations</h3>
-                    <div class="registration-stats">
-                        <span class="stat-item">
-                            <strong>Total:</strong> <?php echo $event['registration_count']; ?>
-                        </span>
-                        <span class="stat-item">
-                            <strong>Approved:</strong> <?php echo $event['approved_count']; ?>
-                        </span>
-                        <span class="stat-item">
-                            <strong>Available:</strong> <?php echo $event['capacity'] - $event['approved_count']; ?>
-                        </span>
-                    </div>
-                </div>
-                
-                <div class="table-responsive">
-                    <table>
+        </div>
+
+        <h2>Registered Students</h2>
+        <div class="card">
+            <div class="card-body">
+                <?php if ($registration_count == 0): ?>
+                    <p>No students have registered for this event yet.</p>
+                <?php else: ?>
+                    <table class="table">
                         <thead>
                             <tr>
-                                <th>Student Name</th>
-                                <th>Matrix No</th>
+                                <th>Name</th>
                                 <th>Email</th>
                                 <th>Registration Date</th>
                                 <th>Status</th>
-                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <?php while ($registration = mysqli_fetch_assoc($registrations)): ?>
-                            <tr>
-                                <td><?php echo htmlspecialchars($registration['student_name']); ?></td>
-                                <td><?php echo htmlspecialchars($registration['matrix_no']); ?></td>
-                                <td><?php echo htmlspecialchars($registration['student_email']); ?></td>
-                                <td><?php echo date('M d, Y H:i', strtotime($registration['registration_date'])); ?></td>
-                                <td>
-                                    <span class="status-badge <?php echo $registration['status']; ?>">
-                                        <?php echo ucfirst($registration['status']); ?>
-                                    </span>
-                                </td>
-                                <td>
-                                    <form method="POST" action="" class="status-form">
-                                        <input type="hidden" name="registration_id" value="<?php echo $registration['registration_id']; ?>">
-                                        <select name="new_status" onchange="this.form.submit()" <?php echo $event['status'] === 'completed' ? 'disabled' : ''; ?>>
-                                            <option value="pending" <?php echo $registration['status'] === 'pending' ? 'selected' : ''; ?>>Pending</option>
-                                            <option value="approved" <?php echo $registration['status'] === 'approved' ? 'selected' : ''; ?>>Approved</option>
-                                            <option value="rejected" <?php echo $registration['status'] === 'rejected' ? 'selected' : ''; ?>>Rejected</option>
-                                        </select>
-                                        <input type="hidden" name="update_status" value="1">
-                                    </form>
-                                </td>
-                            </tr>
-                            <?php endwhile; ?>
+                            <?php foreach ($registrations as $reg): ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars($reg['name']); ?></td>
+                                    <td><?php echo htmlspecialchars($reg['email']); ?></td>
+                                    <td><?php echo formatDateTime($reg['registration_date']); ?></td>
+                                    <td>
+                                        <span class="badge badge-info"><?php echo ucfirst($reg['status']); ?></span>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
                         </tbody>
                     </table>
-                </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
 
-    <style>
-    .event-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 20px;
-    }
-    
-    .event-header h3 {
-        margin: 0;
-        color: #2c3e50;
-    }
-    
-    .event-details {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 20px;
-        margin-bottom: 30px;
-    }
-    
-    .detail-item label {
-        display: block;
-        color: #666;
-        margin-bottom: 5px;
-    }
-    
-    .detail-item span {
-        font-weight: 500;
-    }
-    
-    .event-description {
-        margin-top: 20px;
-        padding-top: 20px;
-        border-top: 1px solid #ddd;
-    }
-    
-    .event-description h4 {
-        margin: 0 0 10px 0;
-        color: #2c3e50;
-    }
-    
-    .registration-stats {
-        display: flex;
-        gap: 20px;
-    }
-    
-    .stat-item {
-        padding: 5px 10px;
-        background: #f8f9fa;
-        border-radius: 4px;
-    }
-    
-    .header-actions {
-        display: flex;
-        gap: 10px;
-    }
-    
-    .status-badge {
-        display: inline-block;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.9em;
-    }
-    
-    .status-badge.upcoming {
-        background-color: #cce5ff;
-        color: #004085;
-    }
-    
-    .status-badge.ongoing {
-        background-color: #d4edda;
-        color: #155724;
-    }
-    
-    .status-badge.completed {
-        background-color: #e2e3e5;
-        color: #383d41;
-    }
-    
-    .status-badge.pending {
-        background-color: #fff3cd;
-        color: #856404;
-    }
-    
-    .status-badge.approved {
-        background-color: #d4edda;
-        color: #155724;
-    }
-    
-    .status-badge.rejected {
-        background-color: #f8d7da;
-        color: #721c24;
-    }
-    
-    .status-form {
-        display: inline-block;
-    }
-    
-    .status-form select {
-        padding: 5px;
-        border-radius: 4px;
-        border: 1px solid #ddd;
-    }
-    
-    .status-form select:disabled {
-        background-color: #e9ecef;
-        cursor: not-allowed;
-    }
-    
-    @media (max-width: 768px) {
-        .event-details {
-            grid-template-columns: 1fr;
-        }
+    <footer id="contact" class="footer" style="width:100vw;">
+      <div class="footer-content">
+        <img src="../images/UniLogo.png" class="university-logo" alt="University Logo">
+        <div class="contact">
+          <strong>LIM EN DHONG</strong>
+          <p>
+            A23CS0239<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            limdhong@graduate.utm.my
+          </p>
+        </div>
+        <div class="contact">
+          <strong>NG JIN EN</strong>
+          <p>
+            A23CS0146<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            ngjinen@graduate.utm.my
+          </p>
+        </div>
+        <div class="contact">
+          <strong>YEO WERN MIN</strong>
+          <p>
+            A23CS0285<br>
+            Year 2 Network & Security<br>
+            Faculty of Computing UTM<br>
+            yeomin@graduate.utm.my
+          </p>
+        </div>
+      </div>
         
-        .registration-stats {
-            flex-direction: column;
-            gap: 10px;
-        }
-    }
-    </style>
+    <div class="landing-footer" style="text-align:center;">
+        &copy; <?php echo date('Y'); ?> Event Management System by Group BlaBlaBla
+    </div>
+    </footer>
 </body>
 </html>

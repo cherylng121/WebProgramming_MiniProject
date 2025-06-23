@@ -10,57 +10,77 @@ $message = '';
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    if ($action == 'delete') {
-        $event_id = $_POST['event_id'];
+    if ($action == 'update_status') {
+        $registration_id = $_POST['registration_id'];
+        $status = $_POST['status'];
         
-        // Verify the event belongs to this organizer
-        $stmt = $pdo->prepare("SELECT event_id FROM events WHERE event_id = ? AND created_by = ?");
-        $stmt->execute([$event_id, $user_id]);
+        // Verify the registration is for an event created by this organizer
+        $stmt = $pdo->prepare("SELECT er.registration_id FROM event_registrations er 
+                               JOIN events e ON er.event_id = e.event_id 
+                               WHERE er.registration_id = ? AND e.created_by = ?");
+        $stmt->execute([$registration_id, $user_id]);
         if ($stmt->fetch()) {
             try {
-                $stmt = $pdo->prepare("DELETE FROM events WHERE event_id = ? AND created_by = ?");
-                $stmt->execute([$event_id, $user_id]);
-                $message = 'Event deleted successfully!';
+                $stmt = $pdo->prepare("UPDATE event_registrations SET status = ? WHERE registration_id = ?");
+                $stmt->execute([$status, $registration_id]);
+                $message = 'Registration status updated successfully!';
             } catch (Exception $e) {
-                $errors[] = 'Error deleting event: ' . $e->getMessage();
+                $errors[] = 'Error updating registration: ' . $e->getMessage();
             }
         } else {
-            $errors[] = 'You can only delete your own events.';
+            $errors[] = 'You can only update registrations for your own events.';
         }
     }
 }
 
-// Get events for this organizer
-$search = $_GET['search'] ?? '';
+// Get registrations for this organizer's events
+$event_filter = $_GET['event_id'] ?? '';
 $status_filter = $_GET['status'] ?? '';
-$sort = $_GET['sort'] ?? 'created_at';
+$search = $_GET['search'] ?? '';
+$sort = $_GET['sort'] ?? 'registration_date';
 $order = $_GET['order'] ?? 'DESC';
 
 $where_conditions = ["e.created_by = ?"];
 $params = [$user_id];
 
-if (!empty($search)) {
-    $where_conditions[] = "(e.title LIKE ? OR e.description LIKE ? OR e.location LIKE ?)";
-    $params = array_merge($params, ["%$search%", "%$search%", "%$search%"]);
+if (!empty($event_filter)) {
+    $where_conditions[] = "e.event_id = ?";
+    $params[] = $event_filter;
 }
 
 if (!empty($status_filter)) {
-    $where_conditions[] = "e.status = ?";
+    $where_conditions[] = "er.status = ?";
     $params[] = $status_filter;
+}
+
+if (!empty($search)) {
+    $where_conditions[] = "(u.name LIKE ? OR u.email LIKE ? OR e.title LIKE ?)";
+    $params = array_merge($params, ["%$search%", "%$search%", "%$search%"]);
 }
 
 $where_clause = "WHERE " . implode(' AND ', $where_conditions);
 
-$stmt = $pdo->prepare("SELECT e.*, 
-                              (SELECT COUNT(*) FROM event_registrations WHERE event_id = e.event_id) as registration_count
-                       FROM events e 
+$stmt = $pdo->prepare("SELECT er.*, e.title as event_title, e.event_date, e.event_time, e.location, e.capacity,
+                              u.name as student_name, u.email as student_email, u.phone as student_phone
+                       FROM event_registrations er 
+                       JOIN events e ON er.event_id = e.event_id 
+                       JOIN users u ON er.user_id = u.user_id 
                        $where_clause 
                        ORDER BY $sort $order");
 $stmt->execute($params);
+$registrations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get events for filter dropdown
+$stmt = $pdo->prepare("SELECT event_id, title FROM events WHERE created_by = ? ORDER BY title");
+$stmt->execute([$user_id]);
 $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get statistics for this organizer
-$stmt = $pdo->prepare("SELECT status, COUNT(*) as count FROM events WHERE created_by = ? GROUP BY status");
+// Get statistics
+$stmt = $pdo->prepare("SELECT er.status, COUNT(*) as count 
+                       FROM event_registrations er 
+                       JOIN events e ON er.event_id = e.event_id 
+                       WHERE e.created_by = ? 
+                       GROUP BY er.status");
 $stmt->execute([$user_id]);
 $status_stats = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $stats = [];
@@ -77,7 +97,7 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Events - Event Organizer Dashboard</title>
+    <title>Manage Registrations - Event Organizer Dashboard</title>
     <link rel="stylesheet" href="../assets/css/style.css">
 </head>
 <body>
@@ -106,8 +126,7 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
 
     <div class="container">
         <div class="d-flex justify-content-between align-items-center mb-3">
-            <h1>My Events</h1>
-            <a href="create_event.php" class="btn btn-success">Create New Event</a>
+            <h1>Manage Registrations</h1>
         </div>
 
         <?php if ($message): ?>
@@ -127,20 +146,20 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
         <!-- Statistics -->
         <div class="stats-grid">
             <div class="stat-card">
-                <div class="stat-number"><?php echo $stats['pending'] ?? 0; ?></div>
-                <div class="stat-label">Pending Events</div>
+                <div class="stat-number"><?php echo $stats['registered'] ?? 0; ?></div>
+                <div class="stat-label">Registered</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number"><?php echo $stats['approved'] ?? 0; ?></div>
-                <div class="stat-label">Approved Events</div>
+                <div class="stat-number"><?php echo $stats['attended'] ?? 0; ?></div>
+                <div class="stat-label">Attended</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number"><?php echo $stats['rejected'] ?? 0; ?></div>
-                <div class="stat-label">Rejected Events</div>
+                <div class="stat-number"><?php echo $stats['cancelled'] ?? 0; ?></div>
+                <div class="stat-label">Cancelled</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number"><?php echo count($events); ?></div>
-                <div class="stat-label">Total Events</div>
+                <div class="stat-number"><?php echo count($registrations); ?></div>
+                <div class="stat-label">Total Registrations</div>
             </div>
         </div>
 
@@ -149,27 +168,38 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
             <form method="GET" action="">
                 <div class="search-row">
                     <div class="form-group" style="flex: 1;">
-                        <label for="searchInput" class="form-label">Search Events</label>
+                        <label for="searchInput" class="form-label">Search Registrations</label>
                         <input type="text" id="searchInput" name="search" class="form-control" 
-                               placeholder="Search by title, description, or location" 
+                               placeholder="Search by student name, email, or event title" 
                                value="<?php echo htmlspecialchars($search); ?>">
+                    </div>
+                    <div class="form-group">
+                        <label for="event_id" class="form-label">Event Filter</label>
+                        <select id="event_id" name="event_id" class="form-select">
+                            <option value="">All Events</option>
+                            <?php foreach ($events as $event): ?>
+                                <option value="<?php echo $event['event_id']; ?>" 
+                                        <?php echo $event_filter == $event['event_id'] ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars($event['title']); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label for="status" class="form-label">Status Filter</label>
                         <select id="status" name="status" class="form-select">
                             <option value="">All Status</option>
-                            <option value="pending" <?php echo $status_filter == 'pending' ? 'selected' : ''; ?>>Pending</option>
-                            <option value="approved" <?php echo $status_filter == 'approved' ? 'selected' : ''; ?>>Approved</option>
-                            <option value="rejected" <?php echo $status_filter == 'rejected' ? 'selected' : ''; ?>>Rejected</option>
+                            <option value="registered" <?php echo $status_filter == 'registered' ? 'selected' : ''; ?>>Registered</option>
+                            <option value="attended" <?php echo $status_filter == 'attended' ? 'selected' : ''; ?>>Attended</option>
                             <option value="cancelled" <?php echo $status_filter == 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
                         </select>
                     </div>
                     <div class="form-group">
                         <label for="sort" class="form-label">Sort By</label>
                         <select id="sort" name="sort" class="form-select">
-                            <option value="created_at" <?php echo $sort == 'created_at' ? 'selected' : ''; ?>>Date Created</option>
+                            <option value="registration_date" <?php echo $sort == 'registration_date' ? 'selected' : ''; ?>>Registration Date</option>
                             <option value="event_date" <?php echo $sort == 'event_date' ? 'selected' : ''; ?>>Event Date</option>
-                            <option value="title" <?php echo $sort == 'title' ? 'selected' : ''; ?>>Title</option>
+                            <option value="student_name" <?php echo $sort == 'student_name' ? 'selected' : ''; ?>>Student Name</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -186,61 +216,59 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
             </form>
         </div>
 
-        <!-- Events List -->
+        <!-- Registrations List -->
         <div class="card">
             <div class="card-header">
-                <h3 class="card-title">Events List (<?php echo count($events); ?> events)</h3>
+                <h3 class="card-title">Registrations List (<?php echo count($registrations); ?> registrations)</h3>
             </div>
             <div class="table-responsive">
                 <table class="table">
                     <thead>
                         <tr>
-                            <th>Title</th>
-                            <th>Date & Time</th>
-                            <th>Location</th>
-                            <th>Capacity</th>
-                            <th>Registrations</th>
+                            <th>Student</th>
+                            <th>Event</th>
+                            <th>Event Date</th>
+                            <th>Registration Date</th>
                             <th>Status</th>
-                            <th>Created</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($events as $event): ?>
+                        <?php foreach ($registrations as $registration): ?>
                         <tr>
                             <td>
-                                <strong><?php echo htmlspecialchars($event['title']); ?></strong>
-                                <br><small class="text-muted"><?php echo htmlspecialchars(substr($event['description'], 0, 100)) . '...'; ?></small>
+                                <strong><?php echo htmlspecialchars($registration['student_name']); ?></strong>
+                                <br><small class="text-muted"><?php echo htmlspecialchars($registration['student_email']); ?></small>
+                                <?php if ($registration['student_phone']): ?>
+                                    <br><small class="text-muted"><?php echo htmlspecialchars($registration['student_phone']); ?></small>
+                                <?php endif; ?>
                             </td>
                             <td>
-                                <?php echo formatDate($event['event_date']); ?>
-                                <br><small class="text-muted"><?php echo date('g:i A', strtotime($event['event_time'])); ?></small>
+                                <strong><?php echo htmlspecialchars($registration['event_title']); ?></strong>
+                                <br><small class="text-muted"><?php echo htmlspecialchars($registration['location']); ?></small>
                             </td>
-                            <td><?php echo htmlspecialchars($event['location']); ?></td>
-                            <td><?php echo $event['capacity'] ? $event['capacity'] : 'Unlimited'; ?></td>
                             <td>
-                                <span class="badge badge-info"><?php echo $event['registration_count']; ?></span>
+                                <?php echo formatDate($registration['event_date']); ?>
+                                <br><small class="text-muted"><?php echo date('g:i A', strtotime($registration['event_time'])); ?></small>
                             </td>
+                            <td><?php echo formatDate($registration['registration_date']); ?></td>
                             <td>
                                 <span class="badge badge-<?php 
-                                    echo $event['status'] == 'approved' ? 'success' : 
-                                        ($event['status'] == 'pending' ? 'warning' : 
-                                        ($event['status'] == 'rejected' ? 'danger' : 'secondary')); 
+                                    echo $registration['status'] == 'attended' ? 'success' : 
+                                        ($registration['status'] == 'registered' ? 'info' : 'danger'); 
                                 ?>">
-                                    <?php echo ucfirst($event['status']); ?>
+                                    <?php echo ucfirst($registration['status']); ?>
                                 </span>
                             </td>
-                            <td><?php echo formatDate($event['created_at']); ?></td>
                             <td>
-                                <a href="view_event.php?id=<?php echo $event['event_id']; ?>" class="btn btn-info btn-sm">View</a>
-                                <?php if ($event['status'] == 'pending'): ?>
-                                    <a href="edit_event.php?id=<?php echo $event['event_id']; ?>" class="btn btn-warning btn-sm">Edit</a>
-                                <?php endif; ?>
-                                <a href="registrations.php?event_id=<?php echo $event['event_id']; ?>" class="btn btn-success btn-sm">Registrations</a>
-                                <form method="POST" action="?action=delete" style="display: inline;" 
-                                      onsubmit="return confirm('Are you sure you want to delete this event?')">
-                                    <input type="hidden" name="event_id" value="<?php echo $event['event_id']; ?>">
-                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                <form method="POST" action="?action=update_status" style="display: inline;">
+                                    <input type="hidden" name="registration_id" value="<?php echo $registration['registration_id']; ?>">
+                                    <select name="status" class="form-select form-select-sm" style="width: auto; display: inline-block;">
+                                        <option value="registered" <?php echo $registration['status'] == 'registered' ? 'selected' : ''; ?>>Registered</option>
+                                        <option value="attended" <?php echo $registration['status'] == 'attended' ? 'selected' : ''; ?>>Attended</option>
+                                        <option value="cancelled" <?php echo $registration['status'] == 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
+                                    </select>
+                                    <button type="submit" class="btn btn-warning btn-sm">Update</button>
                                 </form>
                             </td>
                         </tr>
@@ -250,12 +278,11 @@ $profile_picture = !empty($user['profile_picture']) ? '../' . $user['profile_pic
             </div>
         </div>
 
-        <?php if (empty($events)): ?>
+        <?php if (empty($registrations)): ?>
             <div class="card">
                 <div class="card-body text-center">
-                    <h4>No events found</h4>
-                    <p class="text-muted">You haven't created any events yet.</p>
-                    <a href="create_event.php" class="btn btn-primary">Create Your First Event</a>
+                    <h4>No registrations found</h4>
+                    <p class="text-muted">No students have registered for your events yet.</p>
                 </div>
             </div>
         <?php endif; ?>

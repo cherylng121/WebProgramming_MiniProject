@@ -1,98 +1,51 @@
 <?php
-session_start();
+require_once 'includes/functions.php';
 
-// Check if user is already logged in
-if(isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true){
-    switch($_SESSION["role"]) {
-        case "admin":
-            header("location: admin/dashboard.php");
-            break;
-        case "organizer":
-            header("location: organizer/dashboard.php");
-            break;
-        case "student":
-            header("location: student/dashboard.php");
-            break;
-    }
-    exit;
-}
 
-require_once "config/database.php";
-
-$username = $password = "";
-$username_err = $password_err = $login_err = "";
-
-if($_SERVER["REQUEST_METHOD"] == "POST"){
-    // Validate username
-    if(empty(trim($_POST["username"]))){
-        $username_err = "Please enter username.";
-    } else{
-        $username = trim($_POST["username"]);
-    }
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $username = sanitizeInput($_POST['username']);
+    $password = $_POST['password'];
+    $remember = isset($_POST['remember']);
     
-    // Validate password
-    if(empty(trim($_POST["password"]))){
-        $password_err = "Please enter your password.";
-    } else{
-        $password = trim($_POST["password"]);
-    }
-    
-    // Validate credentials
-    if(empty($username_err) && empty($password_err)){
-        $sql = "SELECT l.username, l.password, l.role, l.user_id, u.name 
-                FROM login l 
-                JOIN users u ON l.user_id = u.user_id 
-                WHERE l.username = ?";
+    if (empty($username) || empty($password)) {
+        $error = 'Please enter both username and password.';
+    } else {
+        $user = getUserByUsername($username);
         
-        if($stmt = mysqli_prepare($conn, $sql)){
-            mysqli_stmt_bind_param($stmt, "s", $param_username);
-            $param_username = $username;
+        if ($user && password_verify($password, $user['password']) && $user['is_active']) {
+            // Set session variables
+            $_SESSION['user_id'] = $user['user_id'];
+            $_SESSION['username'] = $user['username'];
+            $_SESSION['user_level'] = $user['user_level'];
+            $_SESSION['name'] = $user['name'];
             
-            if(mysqli_stmt_execute($stmt)){
-                mysqli_stmt_store_result($stmt);
-                
-                if(mysqli_stmt_num_rows($stmt) == 1){
-                    mysqli_stmt_bind_result($stmt, $username, $hashed_password, $role, $user_id, $name);
-                    if(mysqli_stmt_fetch($stmt)){
-                        if(password_verify($password, $hashed_password)){
-                            // Password is correct, start a new session
-                            session_start();
-                            
-                            // Store data in session variables
-                            $_SESSION["loggedin"] = true;
-                            $_SESSION["user_id"] = $user_id;
-                            $_SESSION["username"] = $username;
-                            $_SESSION["role"] = $role;
-                            $_SESSION["name"] = $name;
-                            
-                            // Redirect user to appropriate dashboard
-                            switch($role) {
-                                case "admin":
-                                    header("location: admin/dashboard.php");
-                                    break;
-                                case "organizer":
-                                    header("location: organizer/dashboard.php");
-                                    break;
-                                case "student":
-                                    header("location: student/dashboard.php");
-                                    break;
-                            }
-                        } else{
-                            $login_err = "Invalid username or password.";
-                        }
-                    }
-                } else{
-                    $login_err = "Invalid username or password.";
-                }
-            } else{
-                echo "Oops! Something went wrong. Please try again later.";
+            // Update last login
+            updateLastLogin($user['user_id']);
+            
+            // Set remember me cookie if requested
+            if ($remember) {
+                setUserCookie($user['username'], $user['user_id']);
             }
-
-            mysqli_stmt_close($stmt);
+            
+            // Redirect based on user level
+            switch($user['user_level']) {
+                case '1': // Admin
+                    header('Location: admin/dashboard.php');
+                    break;
+                case '2': // Event Organizer
+                    header('Location: organizer/dashboard.php');
+                    break;
+                case '3': // Student
+                    header('Location: student/dashboard.php');
+                    break;
+                default:
+                    header('Location: index.php');
+            }
+            exit();
+        } else {
+            $error = 'Invalid username or password.';
         }
     }
-    
-    mysqli_close($conn);
 }
 ?>
 
@@ -101,48 +54,57 @@ if($_SERVER["REQUEST_METHOD"] == "POST"){
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Student Event Management System</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="assets/css/style.css" rel="stylesheet">
+    <title>Login - Event Management System</title>
+    <link rel="stylesheet" href="assets/css/style.css">
 </head>
-<body class="bg-light">
-    <div class="container">
-        <div class="row justify-content-center mt-5">
-            <div class="col-md-6 col-lg-4">
-                <div class="card shadow">
-                    <div class="card-body">
-                        <h2 class="text-center mb-4">Login</h2>
-                        
-                        <?php 
-                        if(!empty($login_err)){
-                            echo '<div class="alert alert-danger">' . $login_err . '</div>';
-                        }        
-                        ?>
+<body>
+    <div class="header">
+        <div class="navbar">
+            <a href="index.php" class="navbar-brand">Event Management System</a>
+        </div>
+    </div>
 
-                        <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-                            <div class="mb-3">
-                                <label class="form-label">Username</label>
-                                <input type="text" name="username" class="form-control <?php echo (!empty($username_err)) ? 'is-invalid' : ''; ?>" value="<?php echo $username; ?>">
-                                <span class="invalid-feedback"><?php echo $username_err; ?></span>
-                            </div>    
-                            <div class="mb-3">
-                                <label class="form-label">Password</label>
-                                <input type="password" name="password" class="form-control <?php echo (!empty($password_err)) ? 'is-invalid' : ''; ?>">
-                                <span class="invalid-feedback"><?php echo $password_err; ?></span>
-                            </div>
-                            <div class="d-grid">
-                                <button type="submit" class="btn btn-primary">Login</button>
-                            </div>
-                            <p class="text-center mt-3">
-                                Don't have an account? <a href="register.php">Sign up now</a>
-                            </p>
-                        </form>
+    <div class="container">
+        <div class="row">
+            <div class="col-md-6" style="margin: 0 auto;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title text-center">Login</h2>
+                    </div>
+                    
+                    
+                    <form id="loginForm" method="POST" action="">
+                        <div class="form-group">
+                            <label for="username" class="form-label">Username</label>
+                            <input type="text" id="username" name="username" class="form-control" 
+                                   value="<?php echo isset($_POST['username']) ? htmlspecialchars($_POST['username']) : ''; ?>" 
+                                   required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="password" class="form-label">Password</label>
+                            <input type="password" id="password" name="password" class="form-control" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" name="remember" value="1"> Remember me
+                            </label>
+                        </div>
+                        
+                        <div class="form-group">
+                            <button type="submit" class="btn btn-primary" style="width: 100%;">Login</button>
+                        </div>
+                    </form>
+                    
+                    <div class="text-center mt-3">
+                        <p>Don't have an account? <a href="register.php"> Sign Up</a></p>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="assets/js/validation.js"></script>
 </body>
 </html> 

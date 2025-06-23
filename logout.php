@@ -1,14 +1,13 @@
 <?php
-// Initialize the session
-session_start();
+require_once 'includes/functions.php';
 
-// Unset all of the session variables
-$_SESSION = array();
-
-// Destroy the session
+// Clear session
 session_destroy();
 
+// Clear remember me cookie
+clearUserCookie();
+
 // Redirect to login page
-header("location: login.php");
-exit;
+header('Location: inedx.php');
+exit();
 ?> 
